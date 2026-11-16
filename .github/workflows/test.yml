@@ -14,3 +14,10 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: npm test
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t git-push-gate:test .
+      - run: sh test/e2e.sh

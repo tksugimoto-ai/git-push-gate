@@ -127,6 +127,17 @@ npm ci
 npm test
 ```
 
+コンテナを使った e2e テストもあります（Docker だけが必要）。イメージ自身を「GitHub」（SSH の git サーバー）とクライアントにも使い、本物の entrypoint・sshd・unlock を通して確認します。
+
+```sh
+docker build -t git-push-gate:test .
+sh test/e2e.sh
+```
+
+## イメージの公開
+
+main への push と `v*` タグで、`ghcr.io/tksugimoto/git-push-gate` に linux/amd64・linux/arm64 のイメージを公開します（[.github/workflows/publish.yml](.github/workflows/publish.yml)）。このワークフローは `packages: write` を持つので、ゲート経由では push できません（人間が push します）。
+
 ## ライセンス
 
 MIT
