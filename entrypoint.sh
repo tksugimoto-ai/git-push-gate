@@ -62,6 +62,11 @@ else
   g config --unset gate.agentSocket || true
 fi
 g config gate.protected "$PROTECTED"
+# 壊れたオブジェクト（同じ名前の項目が 2 つある木など）は受け付けない
+g config receive.fsckObjects true
+# bare リポジトリの HEAD が指すブランチ（master など）の削除を receive-pack が拒否すると、
+# GitHub では削除済みなのにクライアントには失敗と返るので、拒否させない（保護は pre-receive が行う）
+g config receive.denyDeleteCurrent ignore
 install -o root -g root -m 755 /usr/local/share/git-push-gate/pre-receive "$REPO/hooks/pre-receive"
 chown -R git:git "$REPO"
 chown root:root "$REPO/hooks" "$REPO/hooks/pre-receive" "$REPO/config"

@@ -10,8 +10,10 @@
 #   CONTAINER_WORKSPACE  devcontainer 内のワークスペースのパス（既定: マウントから探す）
 #   GATE_HOST            devcontainer から見たゲートのホスト名（既定: ポートの公開先から決める）
 #   REMOTE               push 先を変える remote（既定: origin）
+#   CLIENT_KEY           クライアント用の秘密鍵（既定: ゲートの compose.yaml と同じディレクトリの client_key）
 #
-# 事前に、ゲートの config/ にクライアント用の鍵 client_key を作り、公開鍵を client_keys.pub に登録しておく。
+# 事前に、クライアント用の鍵 client_key を作り、公開鍵を config/client_keys.pub に登録しておく。
+# 秘密鍵はゲートには要らないので、ゲートにマウントする config/ の外に置く。
 set -eu
 WS=$(cd "${1:-.}" && pwd)
 REMOTE="${REMOTE:-origin}"
@@ -24,9 +26,11 @@ one() { # 1 行だけなら出力、それ以外はエラー
 
 # --- ゲート ---
 GATE="${GATE:-$(one "$(docker ps -q --filter label=com.docker.compose.service=git-push-gate)" ゲートのコンテナ GATE)}"
-docker exec "$GATE" test -s /config/client_key || die "ゲートの config/client_key がありません。ゲートの設定ディレクトリで次を実行してください:
-  ssh-keygen -t ed25519 -N '' -C git-push-gate-client -f config/client_key
-  cat config/client_key.pub >> config/client_keys.pub
+dir=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$GATE")
+CLIENT_KEY="${CLIENT_KEY:-$dir/client_key}"
+[ -s "$CLIENT_KEY" ] || die "クライアント用の鍵 $CLIENT_KEY がありません。ゲートの compose.yaml のディレクトリで次を実行してください:
+  ssh-keygen -t ed25519 -N '' -C git-push-gate-client -f client_key
+  cat client_key.pub >> config/client_keys.pub
   docker compose restart"
 hostkey=$(docker exec "$GATE" cut -d' ' -f1,2 /srv/git/ssh_host_keys/ssh_host_ed25519_key.pub)
 pub=$(docker port "$GATE" 22/tcp | head -n1)
@@ -55,8 +59,8 @@ x '[ ! -S /var/run/docker.sock ] && [ ! -S /var/run/docker-host.sock ] && [ -z "
 x '! ls /tmp/vscode-ssh-auth-*.sock >/dev/null 2>&1 && [ -z "${SSH_AUTH_SOCK:-}" ]' \
   || die "devcontainer に SSH エージェントが転送されています（ホストの鍵で GitHub に直接 push できてしまう）。止めてください"
 
-# 鍵はホストのファイルを経由せず、ゲートから devcontainer へ直接渡す
-key=$(docker exec "$GATE" cat /config/client_key) && [ -n "$key" ] || die "ゲートからクライアント用の鍵を読めません"
+# 鍵はホストから devcontainer の ~/.ssh へ直接渡す（ワークスペースには置かない）
+key=$(cat "$CLIENT_KEY") && [ -n "$key" ] || die "クライアント用の鍵 $CLIENT_KEY を読めません"
 x 'umask 077 && mkdir -p ~/.ssh && cat > ~/.ssh/git-push-gate' <<EOF
 $key
 EOF

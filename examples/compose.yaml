@@ -12,6 +12,7 @@ services:
     environment:
       UPSTREAM: git@github.com:OWNER/REPO.git
       # PROTECTED_BRANCHES: "main develop"
+      # UNLOCK_LIFETIME: 8h   # パスフレーズ付きの鍵を解除しておく時間（既定は無期限）
     volumes:
       # ワークスペースの外に置くこと（dev コンテナから読めない場所）
       - ${HOME}/.config/git-push-gate/REPO:/config:ro

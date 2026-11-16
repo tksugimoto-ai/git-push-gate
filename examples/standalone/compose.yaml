@@ -1,6 +1,7 @@
 # 利用側のリポジトリを変更せずに使う場合の例（devcontainer が image / Dockerfile 方式で、compose を使わないとき）。
 # ワークスペースの外（例: ~/.config/git-push-gate/REPO/compose.yaml）に置き、ホストで docker compose up -d する。
 # 同じディレクトリに config/（github_key, known_hosts, client_keys.pub など）を置く。
+# クライアント用の秘密鍵 client_key は、config/ の外（このファイルと同じディレクトリ）に置く（client/attach.sh が使う）。
 services:
   git-push-gate:
     build: https://github.com/tksugimoto/git-push-gate.git#main
@@ -8,6 +9,7 @@ services:
     environment:
       UPSTREAM: git@github.com:OWNER/REPO.git
       # PROTECTED_BRANCHES: "main develop"
+      # UNLOCK_LIFETIME: 8h   # パスフレーズ付きの鍵を解除しておく時間（既定は無期限）
     ports:
       # 公開先のアドレスは環境で変える（.env に GATE_BIND=172.17.0.1 のように書く）
       #   Docker Desktop（Mac / Windows。WSL2 バックエンドを含む）: 127.0.0.1（既定）

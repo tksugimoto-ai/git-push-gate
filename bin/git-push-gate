@@ -2,7 +2,8 @@
 # authorized_keys の command= から呼ばれる。許可するのは push（git-receive-pack）だけ。
 # SSH_ORIGINAL_COMMAND 以外の環境変数はクライアントから渡せない（sshd の AcceptEnv 既定値）。
 set -eu
-REPO="${GIT_PUSH_GATE_REPO:-/srv/git/repo.git}"
+# GIT_PUSH_GATE_REPO はテスト用。sshd から呼ばれたとき（SSH_CONNECTION がある）は使わない
+if [ -n "${SSH_CONNECTION:-}" ]; then REPO=/srv/git/repo.git; else REPO="${GIT_PUSH_GATE_REPO:-/srv/git/repo.git}"; fi
 
 case "${SSH_ORIGINAL_COMMAND:-}" in
   "git-receive-pack '/repo.git'"|"git-receive-pack 'repo.git'") ;;
@@ -22,7 +23,9 @@ flock -w 300 9 || { echo "git-push-gate: ほかの push が終わらないため
 
 # GitHub の最新状態を反映してから受け付ける。
 # これでクライアント側の fast-forward 判定と、pre-receive の lease が GitHub と一致する。
-git --git-dir="$REPO" fetch --prune --quiet upstream '+refs/heads/*:refs/heads/*'
+timeout 120 git --git-dir="$REPO" fetch --prune --quiet upstream '+refs/heads/*:refs/heads/*'
 
-# 止まったクライアントがロックを持ち続けないよう、push 全体（GitHub への push を含む）の時間に上限を付ける
+# 止まったクライアントがロックを持ち続けないよう、受け付けの時間に上限を付ける。
+# 上限で止まるのは receive-pack だけで、GitHub への push（pre-receive の中、別に 300 秒の上限）は
+# 終わっていることがある。クライアントには失敗と返るので、fetch して確かめること
 exec timeout 600 git-receive-pack "$REPO"

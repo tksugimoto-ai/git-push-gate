@@ -46,7 +46,7 @@ run 'ssh-keygen -q -t ed25519 -N "" -C gate -f /w/github_key_plain
      cat /w/github_key_plain.pub /w/github_key_pp.pub > /w/github/authorized_keys
      cp /w/client/id_ed25519.pub /w/github/client.pub
      cp /w/client/id_ed25519.pub /w/config/client_keys.pub
-     cp /w/client/id_ed25519 /w/config/client_key'
+     cp /w/client/id_ed25519 /w/client_key && chmod 644 /w/client_key'   # attach.sh がホストから読む（テスト用に誰でも読める）
 
 # 「GitHub」: ネットワーク上の名前は github.com
 docker run -d --name "$P-github" --network "$NET" --network-alias github.com \
@@ -117,10 +117,10 @@ until docker exec "$P-dev" id dev >/dev/null 2>&1; do sleep 1; done
 docker exec "$P-dev" sh -c "chown dev /workspaces/ws && su dev -c 'cd /workspaces/ws && git init -q -b attached &&
   git remote add origin https://github.invalid/repo.git && $(commit x | sed 's/git commit/git -c user.name=t -c user.email=t@example.com commit/')'"
 check "attach.sh で設定した devcontainer から push できる" \
-  'GATE="$P-gate" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
+  'GATE="$P-gate" CLIENT_KEY="$T/client_key" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
    docker exec -u dev -w /workspaces/ws "$P-dev" git push -q origin attached >>"$T/out" 2>&1 && gh_has attached'
 check "attach.sh は 2 回実行しても設定が重複しない" \
-  'GATE="$P-gate" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
+  'GATE="$P-gate" CLIENT_KEY="$T/client_key" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
    [ "$(docker exec -u dev "$P-dev" grep -c git-push-gate.conf /home/dev/.ssh/config)" = 1 ]'
 docker rm -f "$P-dev" >/dev/null
 # SSH エージェントが転送されている devcontainer には、設定せずに止める
@@ -128,7 +128,7 @@ mkdir -p "$T/ws2"
 docker run -d --name "$P-dev" -v "$T/ws2:/workspaces/ws2" -e SSH_AUTH_SOCK=/tmp/agent.sock \
   --label "devcontainer.local_folder=$T/ws2" --entrypoint sleep "$IMAGE" 1000000 >/dev/null
 check "SSH エージェントが転送されていれば attach.sh は止まる" \
-  '! GATE="$P-gate" sh "$ROOT/client/attach.sh" "$T/ws2" >"$T/out" 2>&1 && grep -q "SSH エージェントが転送" "$T/out" &&
+  '! GATE="$P-gate" CLIENT_KEY="$T/client_key" sh "$ROOT/client/attach.sh" "$T/ws2" >"$T/out" 2>&1 && grep -q "SSH エージェントが転送" "$T/out" &&
    ! docker exec "$P-dev" test -e /root/.ssh/git-push-gate'
 docker rm -f "$P-dev" >/dev/null
 

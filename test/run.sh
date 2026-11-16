@@ -20,15 +20,16 @@ git clone -q gh.git seed 2>/dev/null
 # ゲート側のリポジトリ（entrypoint.sh 相当）
 git init -q --bare gate.git
 git --git-dir=gate.git config remote.upstream.url "$T/gh.git"
-git --git-dir=gate.git config gate.protected "main develop"   # entrypoint.sh が書き込むもの
+git --git-dir=gate.git config gate.protected "main develop"   # 以下 3 つは entrypoint.sh が書き込むもの
+git --git-dir=gate.git config receive.fsckObjects true
+git --git-dir=gate.git config receive.denyDeleteCurrent ignore
 # ローカル転送だと quarantine 用の環境変数が上流に漏れるので外す（SSH 越しの GitHub では不要）
 git --git-dir=gate.git config remote.upstream.receivepack \
   'env -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES git-receive-pack'
 cp "$ROOT/hooks/pre-receive" gate.git/hooks/pre-receive
 cat > rp <<RP
 #!/bin/sh
-export SSH_ORIGINAL_COMMAND="git-receive-pack 'repo.git'" GIT_PUSH_GATE_REPO="$T/gate.git" \
-  GIT_PUSH_GATE_CHECK="$ROOT/hooks/check-workflows.mjs"
+export SSH_ORIGINAL_COMMAND="git-receive-pack 'repo.git'" GIT_PUSH_GATE_REPO="$T/gate.git"
 exec "$ROOT/bin/git-push-gate"
 RP
 chmod +x rp
@@ -53,6 +54,11 @@ gh_has() { git --git-dir="$T/gh.git" rev-parse -q --verify "refs/heads/$1" >/dev
 wf() { # ブランチを main から切ってワークフローを書き換え
   git switch -qC "$1" origin/main; printf '%s\n' "$2" > .github/workflows/ci.yml; git commit -qam "$1"
 }
+human() { # 人間がホストから GitHub に直接 push する（ゲートを通らない）
+  ( cd "$T/seed" && git fetch -q && git switch -qC "$1" "origin/${2:-main}" && sh -c "$3" && git add -A \
+    && git commit -qm "$1" && git push -q origin "$1" )
+  git fetch -q
+}
 
 git switch -qc feat; echo a > a; git add a; git commit -qm a
 expect ok "feature ブランチの新規作成" origin feat
@@ -73,59 +79,43 @@ git commit -q --amend -m b2
 expect ok "強制 push" --force origin feat
 expect ok "feature ブランチの削除" origin :feat
 
-OK='on: [push, pull_request]
-permissions:
-  contents: read
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: npm test'
-wf w1 "$OK";                                                       expect ok "安全なワークフロー" origin w1
-wf w2 "on: push
-jobs:
-  t:
-    runs-on: ubuntu-latest
-    steps: [{run: echo}]";                                         expect ng "permissions 省略" origin w2
-wf w3 "$(echo "$OK" | sed 's/^  test:/  test:\n    permissions: {contents: write}/')"; expect ng "job で write" origin w3
-wf w4 "$(echo "$OK" | sed 's/npm test/echo ${{ secrets.TOKEN }}/')"; expect ng "secrets 参照" origin w4
-wf w5 "$(echo "$OK" | sed 's/ubuntu-latest/[self-hosted]/')";    expect ng "self-hosted ランナー" origin w5
-wf w6 "$(echo "$OK" | sed 's/^on: .*/on: pull_request_target/')"; expect ng "pull_request_target" origin w6
-wf w7 "$OK
-permissions: write-all";                                           expect ng "重複キー" origin w7
-wf w8 "$(echo "$OK" | sed 's/^permissions:/x: \&p write-all\npermissions:/')"; expect ng "アンカー" origin w8
-git switch -qC w9 origin/main; printf 'on: pull_request_target\npermissions: write-all\njobs: {}\n' > ".github/workflows/$(printf '\303\251').yml"
-git add -A; git commit -qm w9;                                     expect ng "ASCII 以外を含むファイル名" origin w9
-# YAML の書き方でポリシーを回避しようとするもの
-wf w10 "$(echo "$OK" | sed 's/npm test/"echo ${{ toJSON(\\x73ecrets) }}"/')"; expect ng "エスケープで書いた secrets" origin w10
-wf w11 "%YAML 1.1
----
-$(echo "$OK" | sed 's/^on: .*/on: pull_request_target/')";        expect ng "YAML 1.1 のディレクティブ" origin w11
-wf w12 "$(echo "$OK" | sed 's/^on: .*/On: pull_request_target/')"; expect ng "大文字の On:" origin w12
-wf w13 "$(echo "$OK" | sed 's/^on: .*/on: Pull_Request_Target/')"; expect ng "大文字を混ぜたトリガー名" origin w13
-wf w14 "$(echo "$OK" | sed 's/^jobs:/Jobs:/; s/ubuntu-latest/self-hosted/')"; expect ng "大文字の Jobs:" origin w14
-wf w15 "$(echo "$OK" | sed 's/runs-on: ubuntu-latest/Runs-On: self-hosted/')"; expect ng "大文字の Runs-On:" origin w15
-wf w16 "on: push
-permissions: {contents: read}
-jobs:
-  t:
-    uses: evil/repo/.github/workflows/x.yml@main"; expect ng "外部の再利用可能なワークフロー" origin w16
-wf w17 "on: push
-permissions: {contents: read}
-jobs:
-  t:
-    uses: ./.github/workflows/ci.yml";             expect ok "同じリポジトリの再利用可能なワークフロー" origin w17
-git switch -qC w18 origin/main; git rm -rq .github/workflows; mkdir -p wfdir
+# ワークフローは保護ブランチ（または push 先の今の内容）と同一のものだけ。中身は見ない
+wf w1 "on: pull_request";                                          expect ng "ワークフローの変更" origin w1
+git switch -qC w2 origin/main; echo 'on: push' > .github/workflows/new.yml; git add -A; git commit -qm w2
+expect ng "ワークフローの追加" origin w2
+git switch -qC w3 origin/main; echo 'on: push' > ".github/workflows/$(printf '\303\251').yml"; git add -A; git commit -qm w3
+expect ng "ASCII 以外を含む名前のワークフローの追加" origin w3
+git switch -qC w4 origin/main; git rm -q .github/workflows/ci.yml; git commit -qm w4
+expect ok "ワークフローの削除" origin w4
+git switch -qC w5 origin/main; git mv .github/workflows/ci.yml .github/workflows/ci2.yml; git commit -qm w5
+expect ng "ワークフローの名前の変更" origin w5
+git switch -qC w6 origin/main; chmod +x .github/workflows/ci.yml; git commit -qam w6
+expect ng "ワークフローの実行権限の変更" origin w6
+git switch -qC w7 origin/main; git rm -rq .github/workflows; mkdir -p wfdir
 printf 'on: pull_request_target\npermissions: write-all\njobs: {}\n' > wfdir/x.yml; ln -s ../wfdir .github/workflows
-git add -A; git commit -qm w18;                                    expect ng ".github/workflows がシンボリックリンク" origin w18
+git add -A; git commit -qm w7;                                     expect ng ".github/workflows がシンボリックリンク" origin w7
+git switch -qC w8 origin/main; git rm -rq .github; mkdir -p gh/workflows; echo 'on: push' > gh/workflows/x.yml; ln -s gh .github
+git add -A; git commit -qm w8;                                     expect ng ".github がシンボリックリンク" origin w8
+git switch -qC w9 origin/main; mkdir -p .github/workflows/sub; echo 'on: push' > .github/workflows/sub/x.yml; git add -A; git commit -qm w9
+expect ng "サブディレクトリへのワークフローの追加" origin w9
+# 人間が push したワークフローの上に、エージェントがコミットを積む
+human hw main "printf 'on: pull_request\n' > .github/workflows/ci.yml"
+git switch -qC hw origin/hw; echo c > c; git add c; git commit -qm c
+expect ok "人間が変更したワークフローの上に積んだコミット" origin hw
+git rebase -q --onto origin/hw HEAD~1; git commit -q --allow-empty -m e
+expect ok "人間が変更したワークフローの上での強制 push" --force origin hw
+printf 'on: [push]\n' > .github/workflows/ci.yml; git commit -qam hw2
+expect ng "人間が変更したワークフローの書き換え" origin hw
+git reset -q --hard origin/hw
+expect ng "人間が変更したワークフローを別のブランチへ" origin hw:refs/heads/hw-copy
+human ha main "echo z >> .github/actions/a/action.yml"
+git switch -qC ha origin/ha; echo c > c; git add c; git commit -qm c
+expect ok "人間が変更した .github/actions の上に積んだコミット" origin ha
 # 名前を間違えた保護ブランチ
 git --git-dir="$T/gate.git" config gate.protected "main develop nosuch"
 git switch -qC typo origin/main; echo t > t; git add t; git commit -qm typo
 expect ng "GitHub にない保護ブランチ" origin typo
 git --git-dir="$T/gate.git" config gate.protected "main develop"
-wf w19 "$(echo "$OK" | sed 's/ubuntu-latest/ubuntu-my-selfhosted/')"; expect ng "ubuntu- で始まる独自ラベル" origin w19
-wf w20 "$(echo "$OK" | sed 's/ubuntu-latest/macos-15-xlarge/')";     expect ok "GitHub ホストのラベル（macos-15-xlarge）" origin w20
 # 紛らわしいブランチ名
 git switch -qC odd origin/main; echo o > o; git add o; git commit -qm odd
 expect ng "HEAD という名前のブランチ" origin odd:refs/heads/HEAD
@@ -135,14 +125,13 @@ expect ng "refs/ で始まるブランチ名" origin odd:refs/heads/refs/tags/v1
 git --git-dir="$T/gate.git" config gate.protected " "
 expect ng "保護ブランチの一覧が空のときの削除" origin :develop
 git --git-dir="$T/gate.git" config gate.protected "main develop"
-wf w21 "$(printf '\357\273\277%%YAML 1.1\n---\n')$(echo "$OK" | sed 's/^on: .*/on: pull_request_target/')"; expect ng "BOM の後ろのディレクティブ" origin w21
 expect ng "40 桁の 16 進数のブランチ名" origin "odd:refs/heads/$(git rev-parse HEAD)"
 # デフォルトブランチ（main）が保護ブランチに入っていない
 git --git-dir="$T/gate.git" config gate.protected "develop"
 expect ng "デフォルトブランチが保護されていない" origin odd:refs/heads/odd2
 git --git-dir="$T/gate.git" config gate.protected "main develop"
 # フックに不正な形式の行が渡ったとき（receive-pack は ref 名を検査する前にフックへ渡す）
-if printf 'x refs/heads/main refs/heads/evil\n' | (cd "$T/gate.git" && GIT_DIR=. GIT_PUSH_GATE_CHECK="$ROOT/hooks/check-workflows.mjs" sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 \
+if printf 'x refs/heads/main refs/heads/evil\n' | (cd "$T/gate.git" && GIT_DIR=. sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 \
    || ! grep -q '不正な更新の指定' "$T/out"
 then fail=$((fail+1)); echo "FAIL 不正な形式の行は拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   不正な形式の行は拒否"; fi
 git switch -qC act origin/main; echo y >> .github/actions/a/action.yml; git commit -qam act
