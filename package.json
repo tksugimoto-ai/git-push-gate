@@ -1,0 +1,12 @@
+{
+  "name": "git-push-gate",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "sh test/run.sh"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  }
+}

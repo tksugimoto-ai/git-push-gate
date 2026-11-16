@@ -1,0 +1,21 @@
+# 利用側プロジェクトの .devcontainer/compose.yaml の例
+services:
+  dev:
+    image: mcr.microsoft.com/devcontainers/base:trixie
+    command: sleep infinity
+    volumes:
+      - ..:/workspaces/app:cached
+    # docker.sock はマウントしない（git-push-gate コンテナの中身を読めてしまう）
+
+  git-push-gate:
+    build: https://github.com/tksugimoto/git-push-gate.git#main
+    environment:
+      UPSTREAM: git@github.com:OWNER/REPO.git
+      # PROTECTED_BRANCHES: "main develop"
+    volumes:
+      # ワークスペースの外に置くこと（dev コンテナから読めない場所）
+      - ${HOME}/.config/git-push-gate/REPO:/config:ro
+      - git-push-gate-data:/srv/git
+
+volumes:
+  git-push-gate-data:

@@ -1,0 +1,49 @@
+#!/bin/sh
+# 受け取った更新を検査し、通ったものだけを GitHub に同期 push する。
+# GitHub 側で失敗したらこのフックも失敗するので、クライアントの push もエラーになる。
+set -eu
+zero=0000000000000000000000000000000000000000
+CHECK="${GIT_PUSH_GATE_CHECK:-/usr/local/share/git-push-gate/check-workflows.mjs}"
+# 保護ブランチは entrypoint がリポジトリの設定に書き込む（sshd 経由では環境変数が届かないため）
+PROTECTED=$(git config --get gate.protected || echo "main develop")
+
+# 複合アクションは、シークレットや write 権限を持つ既存ワークフローからも呼ばれうるので自動許可しない
+tree_of() { git rev-parse -q --verify "$1:.github/actions" 2>/dev/null || echo none; }
+
+set --
+while read -r old new ref; do
+  case "$ref" in
+    refs/heads/*) ;;
+    *) echo "git-push-gate: $ref は許可されていません（ブランチのみ）" >&2; exit 1 ;;
+  esac
+  for b in $PROTECTED; do
+    if [ "$ref" = "refs/heads/$b" ]; then
+      echo "git-push-gate: $ref への push は禁止" >&2; exit 1
+    fi
+  done
+
+  if [ "$new" = "$zero" ]; then
+    spec=":$ref"                       # ブランチ削除
+  else
+    # .github/actions は保護ブランチのどれかと同一でなければ拒否
+    t=$(tree_of "$new"); same=no
+    for b in $PROTECTED; do [ "$t" = "$(tree_of "refs/heads/$b")" ] && same=yes; done
+    if [ "$same" = no ]; then
+      echo "git-push-gate: $ref は .github/actions を変更しているため拒否。人間が push してください" >&2
+      exit 1
+    fi
+    # 変更されたワークフローは中身を検査（読み取り専用・シークレットなし等）
+    if ! GIT_PUSH_GATE_PROTECTED="$PROTECTED" node "$CHECK" "$new"; then
+      echo "git-push-gate: $ref のワークフローがポリシー違反。修正するか、人間が push してください" >&2
+      exit 1
+    fi
+    spec="$new:$ref"
+  fi
+
+  # 直前に fetch した GitHub の値を lease にする（その間に誰かが push していたら失敗）
+  [ "$old" = "$zero" ] && expect="" || expect="$old"
+  set -- "$@" "--force-with-lease=$ref:$expect" "$spec"
+done
+
+[ $# -eq 0 ] && exit 0
+git push --atomic --quiet upstream "$@"

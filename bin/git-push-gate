@@ -1,0 +1,20 @@
+#!/bin/sh
+# authorized_keys の command= から呼ばれる。許可するのは push（git-receive-pack）だけ。
+# SSH_ORIGINAL_COMMAND 以外の環境変数はクライアントから渡せない（sshd の AcceptEnv 既定値）。
+set -eu
+REPO="${GIT_PUSH_GATE_REPO:-/srv/git/repo.git}"
+
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  "git-receive-pack '/repo.git'"|"git-receive-pack 'repo.git'") ;;
+  *) echo "git-push-gate: このコマンドは許可されていません（push のみ）" >&2; exit 1 ;;
+esac
+
+# 同時 push を直列化（fd 9 は receive-pack に引き継がれ、終了までロックを保持）
+exec 9>"$REPO/push-gate.lock"
+flock 9
+
+# GitHub の最新状態を反映してから受け付ける。
+# これでクライアント側の fast-forward 判定と、pre-receive の lease が GitHub と一致する。
+git --git-dir="$REPO" fetch --prune --quiet upstream '+refs/heads/*:refs/heads/*'
+
+exec git-receive-pack "$REPO"
