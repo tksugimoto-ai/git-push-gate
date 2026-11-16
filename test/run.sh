@@ -20,6 +20,7 @@ git clone -q gh.git seed 2>/dev/null
 # ゲート側のリポジトリ（entrypoint.sh 相当）
 git init -q --bare gate.git
 git --git-dir=gate.git config remote.upstream.url "$T/gh.git"
+git --git-dir=gate.git config gate.protected "main develop"   # entrypoint.sh が書き込むもの
 # ローカル転送だと quarantine 用の環境変数が上流に漏れるので外す（SSH 越しの GitHub では不要）
 git --git-dir=gate.git config remote.upstream.receivepack \
   'env -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES git-receive-pack'

@@ -1,42 +1,70 @@
-// pre-receive から呼ぶ: node check-workflows.mjs <commit>
-// 保護ブランチ（既定: main / develop）のどれとも内容が異なるワークフローファイルだけを、安全ポリシーで検査する。
+// pre-receive から呼ぶ: node check-workflows.mjs <ref> <commit> [<ref> <commit> ...]
+// 保護ブランチ（リポジトリ設定 gate.protected）のどれとも内容が異なるものだけを検査する。
+//   .github/actions   : 保護ブランチのどれかと同一でなければ拒否（既存の特権付きワークフローから呼ばれうるため）
+//   .github/workflows : 異なるファイルを安全ポリシーで検査
 // 方針: 判断に迷うものはすべて拒否（＝人間がホストから push）。
 import { execFileSync } from 'node:child_process';
 import { parseDocument, visit, isAlias } from 'yaml';
 
-const commit = process.argv[2];
-const BASES = (process.env.GIT_PUSH_GATE_PROTECTED ?? 'main develop').split(/\s+/).filter(Boolean).map((b) => `refs/heads/${b}`);
 const DIR = '.github/workflows/';
+const ACTIONS = '.github/actions';
 const BANNED_TRIGGERS = new Set(['pull_request_target', 'workflow_run']); // 特権コンテキストで動くもの
 const RUNNER_OK = /^(ubuntu|windows|macos)-[\w.-]+$/;                     // GitHub ホストのランナーのみ
 
-const git = (...args) => execFileSync('git', args, { encoding: 'utf8', maxBuffer: 1 << 26 });
-const tryGit = (...args) => { try { return git(...args).trim(); } catch { return null; } };
-
-// -z でないと、ASCII 以外を含むパスが引用符付きで出力され、後の比較で一致してしまう
-const entries = git('ls-tree', '-r', '-z', commit, '--', DIR).split('\0').filter(Boolean)
+const git = (args, stderr = 'inherit') => execFileSync('git', args, { encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', stderr] });
+// 失敗してよい呼び出し（存在しないブランチやパス）。エラー出力はクライアントに見せない
+const tryGit = (...args) => { try { return git(args, 'ignore').trim(); } catch { return null; } };
+// -z でないと、ASCII 以外を含むパスが引用符付きで出力され、比較を誤る
+const workflows = (rev) => (tryGit('ls-tree', '-r', '-z', rev, '--', DIR) ?? '').split('\0').filter(Boolean)
   .map((line) => { const [meta, path] = line.split('\t'); return { blob: meta.split(' ')[2], path }; });
+
+const protectedNames = tryGit('config', '--get', 'gate.protected')?.split(/\s+/).filter(Boolean);
+if (!protectedNames) { console.error('git-push-gate: gate.protected が設定されていません'); process.exit(1); }
+// 保護ブランチ側は push の中で変わらないので、一度だけ読む（存在しないブランチは「何もない」として扱う）
+const bases = protectedNames.map((b) => {
+  const rev = `refs/heads/${b}`;
+  return {
+    actions: tryGit('rev-parse', '-q', '--verify', `${rev}:${ACTIONS}`),
+    files: new Set(workflows(rev).map(({ path, blob }) => `${path}\0${blob}`)),
+  };
+});
+
 const errors = [];
+const args = process.argv.slice(2);
+for (let i = 0; i < args.length; i += 2) checkCommit(args[i], args[i + 1]);
 
-for (const { blob, path } of entries) {
-  if (BASES.some((b) => tryGit('rev-parse', '--verify', '-q', `${b}:${path}`) === blob)) continue; // 未変更
-  const fail = (msg) => errors.push(`${path}: ${msg}`);
+if (errors.length) {
+  for (const e of errors) console.error(`git-push-gate: ${e}`);
+  process.exit(1);
+}
 
-  if (!/\.ya?ml$/.test(path)) { fail('ワークフロー以外のファイルは置けません'); continue; }
-  const text = git('cat-file', 'blob', blob);
+function checkCommit(ref, commit) {
+  const actions = tryGit('rev-parse', '-q', '--verify', `${commit}:${ACTIONS}`);
+  if (!bases.some((b) => b.actions === actions)) {
+    errors.push(`${ref}: ${ACTIONS} を変更しているため拒否。人間が push してください`);
+  }
+  for (const { blob, path } of workflows(commit)) {
+    if (bases.some((b) => b.files.has(`${path}\0${blob}`))) continue; // 保護ブランチと同一
+    checkWorkflow(blob, (msg) => errors.push(`${ref}: ${path}: ${msg}`), path);
+  }
+}
+
+function checkWorkflow(blob, fail, path) {
+  if (!/\.ya?ml$/.test(path)) return fail('ワークフロー以外のファイルは置けません');
+  const text = git(['cat-file', 'blob', blob]);
 
   // シークレットは一切参照させない（secrets.X / secrets['X'] / toJSON(secrets) / secrets: inherit すべて）
   if (/secrets/i.test(text)) fail('"secrets" を含められません');
 
   // GitHub のパーサーとの解釈差を突かれないよう、曖昧な YAML は拒否
   const doc = parseDocument(text, { uniqueKeys: true, merge: false, prettyErrors: false });
-  if (doc.errors.length || doc.warnings.length) { fail('YAML として不正または曖昧'); continue; }
+  if (doc.errors.length || doc.warnings.length) return fail('YAML として不正または曖昧');
   let tricky = false;
   visit(doc, { Node(_, n) { if (isAlias(n) || n.anchor || n.tag) tricky = true; } });
-  if (tricky) { fail('アンカー・エイリアス・タグは使えません'); continue; }
+  if (tricky) return fail('アンカー・エイリアス・タグは使えません');
 
   const wf = doc.toJS();
-  if (!wf || typeof wf !== 'object') { fail('空または不正な構造'); continue; }
+  if (!wf || typeof wf !== 'object') return fail('空または不正な構造');
 
   const on = wf.on;
   const triggers = typeof on === 'string' ? [on] : Array.isArray(on) ? on : Object.keys(on ?? {});
@@ -68,9 +96,4 @@ function readOnly(p) {
     return Object.values(p).every((v) => v === 'read' || v === 'none');
   }
   return false; // write-all、文字列式、null など
-}
-
-if (errors.length) {
-  for (const e of errors) console.error(`git-push-gate: ${e}`);
-  process.exit(1);
 }

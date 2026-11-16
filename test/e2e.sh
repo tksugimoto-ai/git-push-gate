@@ -19,12 +19,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# イメージの中でコマンドを実行する（$T を /w にマウント）
-run() { docker run --rm --network "$NET" -v "$T:/w" --entrypoint sh "$IMAGE" -c "$1"; }
+# イメージの中でコマンドを実行する（$T を /w にマウント。RUN_NET でネットワークを変えられる）
+run() {
+  docker run --rm --network "${RUN_NET:-$NET}" -v "$T:/w" --entrypoint sh \
+    -e GIT_AUTHOR_NAME=t -e GIT_AUTHOR_EMAIL=t@example.com -e GIT_COMMITTER_NAME=t -e GIT_COMMITTER_EMAIL=t@example.com \
+    "$IMAGE" -c "$1"
+}
+# クライアントの ssh（鍵と known_hosts をそのまま指定）
+GSSH='ssh -i /w/client/id_ed25519 -o "UserKnownHostsFile=/w/config/known_hosts /w/client/known_hosts_gate"'
 
 pass=0; fail=0
-ok()   { pass=$((pass+1)); echo "ok   $1"; }
-ng()   { fail=$((fail+1)); echo "FAIL $1"; [ -f "$T/out" ] && sed 's/^/     /' "$T/out"; return 0; }
+check() { # check 説明 条件（$T/out に出力を書くと、失敗時に表示する）
+  : > "$T/out"
+  if eval "$2"; then pass=$((pass+1)); echo "ok   $1"
+  else fail=$((fail+1)); echo "FAIL $1"; sed 's/^/     /' "$T/out"; fi
+}
 
 docker network create "$NET" >/dev/null
 mkdir -p "$T/config" "$T/client" "$T/github"
@@ -61,62 +70,43 @@ start_gate() { # start_gate 鍵ファイル名 [追加の docker run 引数...]
 
 # クライアント（devcontainer 相当）。fetch は「GitHub」から直接、push はゲートへ。
 client() {
-  run "set -e
-    mkdir -p ~/.ssh && cp /w/client/id_ed25519 ~/.ssh/ && chmod 600 ~/.ssh/id_ed25519
-    cat /w/config/known_hosts /w/client/known_hosts_gate > ~/.ssh/known_hosts
-    git config --global user.name t; git config --global user.email t@example.com
-    git config --global init.defaultBranch main; git config --global push.negotiate false
+  run "set -e; export GIT_SSH_COMMAND='$GSSH'
     git clone -q git@github.com:repo.git /tmp/dev && cd /tmp/dev
     git remote set-url --push origin ssh://git@gate/repo.git
     $1" >"$T/out" 2>&1
 }
 gh_has() { docker exec "$P-github" git --git-dir=/home/git/repo.git rev-parse -q --verify "refs/heads/$1" >/dev/null; }
+commit() { echo "echo $1 > $1 && git add $1 && git commit -qm $1"; }
 
 # --- パスフレーズなしの鍵 ---
 start_gate github_key_plain
 
-if client 'git switch -qc feat && echo a > a && git add a && git commit -qm a && git push -q origin feat' && gh_has feat
-then ok "feature ブランチの push が GitHub に届く"; else ng "feature ブランチの push が GitHub に届く"; fi
-
-if ! client 'echo b > b && git add b && git commit -qm b && git push -q origin HEAD:main' \
-   && grep -q 'git-push-gate:' "$T/out"
-then ok "main への push は拒否"; else ng "main への push は拒否"; fi
-
-if ! run "cp /w/client/id_ed25519 /tmp/k && chmod 600 /tmp/k &&
-   ssh -i /tmp/k -o UserKnownHostsFile=/w/client/known_hosts_gate git@gate 'cat /etc/passwd'" >"$T/out" 2>&1 \
-   && grep -q '許可されていません' "$T/out" && ! grep -q root: "$T/out"
-then ok "任意のコマンドは拒否"; else ng "任意のコマンドは拒否"; fi
-
-if ! run "cp /w/client/id_ed25519 /tmp/k && chmod 600 /tmp/k &&
-   GIT_SSH_COMMAND='ssh -i /tmp/k -o UserKnownHostsFile=/w/client/known_hosts_gate' git clone -q ssh://git@gate/repo.git /tmp/x" >"$T/out" 2>&1 \
-   && grep -q '許可されていません' "$T/out"
-then ok "ゲートからの clone（upload-pack）は拒否"; else ng "ゲートからの clone（upload-pack）は拒否"; fi
-
-if ! run "ssh-keygen -q -t ed25519 -N '' -f /tmp/k &&
-   ssh -i /tmp/k -o BatchMode=yes -o UserKnownHostsFile=/w/client/known_hosts_gate git@gate git-receive-pack /repo.git" >"$T/out" 2>&1 \
-   && grep -q "Permission denied" "$T/out"
-then ok "登録されていない鍵は拒否"; else ng "登録されていない鍵は拒否"; fi
+check "feature ブランチの push が GitHub に届く" \
+  'client "git switch -qc feat && $(commit a) && git push -q origin feat" && gh_has feat'
+check "main への push は拒否" \
+  '! client "$(commit b) && git push -q origin HEAD:main" && grep -q git-push-gate: "$T/out"'
+check "任意のコマンドは拒否" \
+  '! run "$GSSH git@gate cat /etc/passwd" >"$T/out" 2>&1 && grep -q 許可されていません "$T/out" && ! grep -q root: "$T/out"'
+check "ゲートからの clone（upload-pack）は拒否" \
+  '! run "GIT_SSH_COMMAND='"'"'$GSSH'"'"' git clone -q ssh://git@gate/repo.git /tmp/x" >"$T/out" 2>&1 && grep -q 許可されていません "$T/out"'
+check "登録されていない鍵は拒否" \
+  '! run "ssh-keygen -q -t ed25519 -N \"\" -f /tmp/k && ssh -i /tmp/k -o BatchMode=yes -o UserKnownHostsFile=/w/client/known_hosts_gate git@gate git-receive-pack /repo.git" >"$T/out" 2>&1 && grep -q "Permission denied" "$T/out"'
 
 docker restart "$P-gate" >/dev/null
 wait_ssh gate "$P-gate" >/dev/null
-if client 'git switch -qc feat2 && echo c > c && git add c && git commit -qm c && git push -q origin feat2' && gh_has feat2
-then ok "再起動後も push できる"; else ng "再起動後も push できる"; fi
+check "再起動後も push できる" \
+  'client "git switch -qc feat2 && $(commit c) && git push -q origin feat2" && gh_has feat2'
 
 # compose を使わない devcontainer（既定の bridge で名前解決なし）から、ホストに公開したポート経由で push
 cp "$T/client/known_hosts_gate" "$T/known_hosts_gate_before"
 GW=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
 start_gate github_key_plain -p "$GW::22"
-if cmp -s "$T/client/known_hosts_gate" "$T/known_hosts_gate_before"
-then ok "コンテナを作り直してもホスト鍵が変わらない"; else rm -f "$T/out"; ng "コンテナを作り直してもホスト鍵が変わらない"; fi
+check "コンテナを作り直してもホスト鍵が変わらない" 'cmp "$T/client/known_hosts_gate" "$T/known_hosts_gate_before"'
 PORT=$(docker port "$P-gate" 22/tcp | sed 's/.*://' | head -n1)
-if docker run --rm -v "$T:/w" --entrypoint sh "$IMAGE" -c "set -e
-    h=\$(ip route | awk '/default/{print \$3}')
-    mkdir -p ~/.ssh && cp /w/client/id_ed25519 ~/.ssh/ && chmod 600 ~/.ssh/id_ed25519
-    sed \"s/^gate /[\$h]:$PORT /\" /w/client/known_hosts_gate > ~/.ssh/known_hosts
-    git init -q -b bridge /tmp/d && cd /tmp/d && echo x > x && git add x
-    git -c user.name=t -c user.email=t@example.com commit -qm x
-    git push -q ssh://git@\$h:$PORT/repo.git bridge" >"$T/out" 2>&1 && gh_has bridge
-then ok "既定の bridge からゲートウェイ経由で push できる"; else ng "既定の bridge からゲートウェイ経由で push できる"; fi
+check "既定の bridge からゲートウェイ経由で push できる" 'RUN_NET=bridge run "set -e
+    h=\$(ip route | awk \"/default/{print \\\$3}\")
+    git init -q -b bridge /tmp/d && cd /tmp/d && $(commit x)
+    GIT_SSH_COMMAND='"'"'$GSSH -o HostKeyAlias=gate'"'"' git push -q ssh://git@\$h:$PORT/repo.git bridge" >"$T/out" 2>&1 && gh_has bridge'
 
 # client/attach.sh: VS Code が作る devcontainer に見立てたコンテナの push 先をゲートに向ける
 mkdir -p "$T/ws"
@@ -124,38 +114,31 @@ docker run -d --name "$P-dev" -v "$T/ws:/workspaces/ws" \
   --label "devcontainer.local_folder=$T/ws" --label 'devcontainer.metadata=[{"remoteUser":"dev"}]' \
   --entrypoint sh "$IMAGE" -c 'adduser -D -u 1001 dev && sleep 1000000' >/dev/null
 until docker exec "$P-dev" id dev >/dev/null 2>&1; do sleep 1; done
-docker exec "$P-dev" sh -c 'chown dev /workspaces/ws && su dev -c "cd /workspaces/ws && git init -q -b attached &&
-  git remote add origin https://github.invalid/repo.git && echo x > x && git add x &&
-  git -c user.name=t -c user.email=t@example.com commit -qm x"'
-if GATE="$P-gate" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
-   docker exec -u dev -w /workspaces/ws "$P-dev" git push -q origin attached >>"$T/out" 2>&1 && gh_has attached
-then ok "attach.sh で設定した devcontainer から push できる"; else ng "attach.sh で設定した devcontainer から push できる"; fi
-if GATE="$P-gate" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
-   [ "$(docker exec -u dev "$P-dev" grep -c git-push-gate.conf /home/dev/.ssh/config)" = 1 ]
-then ok "attach.sh は 2 回実行しても設定が重複しない"; else ng "attach.sh は 2 回実行しても設定が重複しない"; fi
+docker exec "$P-dev" sh -c "chown dev /workspaces/ws && su dev -c 'cd /workspaces/ws && git init -q -b attached &&
+  git remote add origin https://github.invalid/repo.git && $(commit x | sed 's/git commit/git -c user.name=t -c user.email=t@example.com commit/')'"
+check "attach.sh で設定した devcontainer から push できる" \
+  'GATE="$P-gate" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
+   docker exec -u dev -w /workspaces/ws "$P-dev" git push -q origin attached >>"$T/out" 2>&1 && gh_has attached'
+check "attach.sh は 2 回実行しても設定が重複しない" \
+  'GATE="$P-gate" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
+   [ "$(docker exec -u dev "$P-dev" grep -c git-push-gate.conf /home/dev/.ssh/config)" = 1 ]'
 docker rm -f "$P-dev" >/dev/null
 
 # --- パスフレーズ付きの鍵 ---
 start_gate github_key_pp -e UNLOCK_LIFETIME=1h
 
-if ! client 'git switch -qc feat3 && echo d > d && git add d && git commit -qm d && git push -q origin feat3' \
-   && grep -q 'ロックされています' "$T/out" && ! gh_has feat3
-then ok "unlock 前の push は「ロックされています」で拒否"; else ng "unlock 前の push は「ロックされています」で拒否"; fi
-
+check "unlock 前の push は「ロックされています」で拒否" \
+  '! client "git switch -qc feat3 && $(commit d) && git push -q origin feat3" && grep -q ロックされています "$T/out" && ! gh_has feat3'
 # 人間の unlock（パスフレーズは SSH_ASKPASS で渡す）
 docker exec "$P-gate" sh -c 'printf "#!/bin/sh\necho secret\n" > /tmp/askpass && chmod 755 /tmp/askpass'
-if docker exec -e SSH_ASKPASS=/tmp/askpass -e SSH_ASKPASS_REQUIRE=force "$P-gate" unlock >"$T/out" 2>&1
-then ok "unlock"; else ng "unlock"; fi
-
-if client 'git switch -qc feat3 && echo d > d && git add d && git commit -qm d && git push -q origin feat3' && gh_has feat3
-then ok "unlock 後の push が GitHub に届く"; else ng "unlock 後の push が GitHub に届く"; fi
-
-if ! client 'echo e > e && git add e && git commit -qm e && git push -q origin HEAD:develop' \
-   && grep -q 'git-push-gate:' "$T/out"
-then ok "unlock 後も develop への push は拒否"; else ng "unlock 後も develop への push は拒否"; fi
-
-if docker exec "$P-gate" sh -c 'su -s /bin/sh git -c "SSH_AUTH_SOCK=/run/git-push-gate/agent.sock ssh-add -l"' | grep -q gate-pp
-then ok "鍵がエージェントに読み込まれている"; else rm -f "$T/out"; ng "鍵がエージェントに読み込まれている"; fi
+check "unlock" \
+  'docker exec -e SSH_ASKPASS=/tmp/askpass -e SSH_ASKPASS_REQUIRE=force "$P-gate" unlock >"$T/out" 2>&1'
+check "unlock 後の push が GitHub に届く" \
+  'client "git switch -qc feat3 && $(commit d) && git push -q origin feat3" && gh_has feat3'
+check "unlock 後も develop への push は拒否" \
+  '! client "$(commit e) && git push -q origin HEAD:develop" && grep -q git-push-gate: "$T/out"'
+check "鍵がエージェントに読み込まれている" \
+  'docker exec "$P-gate" su -s /bin/sh git -c "SSH_AUTH_SOCK=/run/git-push-gate/agent.sock ssh-add -l" | grep -q gate-pp'
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

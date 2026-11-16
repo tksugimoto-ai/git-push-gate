@@ -1,17 +1,17 @@
 #!/bin/sh
 set -eu
+die() { echo "entrypoint: $*" >&2; exit 1; }
 : "${UPSTREAM:?例: git@github.com:owner/repo.git}"
-PROTECTED="${PROTECTED_BRANCHES:-main develop}"
+PROTECTED="${PROTECTED_BRANCHES:-main develop}"   # 既定値はここだけ（フックは gate.protected を読む）
 case "$PROTECTED" in
-  *[*?[]*) echo "entrypoint: PROTECTED_BRANCHES にパターンは使えません（ブランチ名を完全一致で列挙）: $PROTECTED" >&2; exit 1 ;;
+  *[*?[]*) die "PROTECTED_BRANCHES にパターンは使えません（ブランチ名を完全一致で列挙）: $PROTECTED" ;;
 esac
 CONFIG=/config          # github_key, client_keys.pub, known_hosts を置いたディレクトリ（読み取り専用でマウント）
-REPO=/srv/git/repo.git
-# root で git ユーザー所有のリポジトリを操作するため safe.directory を指定
-g() { git -c safe.directory="$REPO" --git-dir="$REPO" "$@"; }
+REPO=/srv/git/repo.git  # root で操作できるよう、Dockerfile で safe.directory に登録してある
+g() { git --git-dir="$REPO" "$@"; }
 
 for f in github_key client_keys.pub known_hosts; do
-  [ -s "$CONFIG/$f" ] || { echo "entrypoint: $CONFIG/$f がありません" >&2; exit 1; }
+  [ -s "$CONFIG/$f" ] || die "$CONFIG/$f がありません"
 done
 
 KEY=/home/git/.ssh/github_key
@@ -28,7 +28,7 @@ if ssh-keygen -y -P '' -f "$KEY" >/dev/null 2>&1; then
   agent_sock=""
 else
   # パスフレーズ付き: コンテナ内の ssh-agent に、人間が unlock で一度だけ読み込ませる
-  [ -s "$CONFIG/github_key.pub" ] || { echo "entrypoint: パスフレーズ付きの鍵には $CONFIG/github_key.pub も必要です" >&2; exit 1; }
+  [ -s "$CONFIG/github_key.pub" ] || die "パスフレーズ付きの鍵には $CONFIG/github_key.pub も必要です"
   install -o git -g git -m 644 "$CONFIG/github_key.pub" "$KEY.pub"
   install -d -o git -g git -m 700 "$AGENT_DIR"
   agent_sock="$AGENT_DIR/agent.sock"
@@ -40,12 +40,13 @@ else
 fi
 
 # クライアント（devcontainer）の公開鍵を、強制コマンド付きで登録
+keys=$(grep -Ev '^[[:space:]]*(#|$)' "$CONFIG/client_keys.pub" || true)
 # オプション（from= など）付きの行は、前に足すオプションと合わさって無効な鍵になるので拒否する
-if grep -Ev '^[[:space:]]*(#|$)' "$CONFIG/client_keys.pub" | grep -Evq '^(ssh-|ecdsa-|sk-)'; then
-  echo "entrypoint: $CONFIG/client_keys.pub には、オプションなしの公開鍵だけを書いてください" >&2; exit 1
+[ -n "$keys" ] || die "$CONFIG/client_keys.pub に公開鍵がありません"
+if printf '%s\n' "$keys" | grep -Evq '^(ssh-|ecdsa-|sk-)'; then
+  die "$CONFIG/client_keys.pub には、オプションなしの公開鍵だけを書いてください"
 fi
-grep -Ev '^[[:space:]]*(#|$)' "$CONFIG/client_keys.pub" \
-  | sed 's|^|command="/usr/local/bin/git-push-gate",restrict |' > /home/git/.ssh/authorized_keys
+printf '%s\n' "$keys" | sed 's|^|command="/usr/local/bin/git-push-gate",restrict |' > /home/git/.ssh/authorized_keys
 chown git:git /home/git/.ssh/authorized_keys && chmod 600 /home/git/.ssh/authorized_keys
 
 [ -d "$REPO" ] || git init -q --bare "$REPO"
