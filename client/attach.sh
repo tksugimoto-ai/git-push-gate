@@ -50,13 +50,15 @@ cws="${CONTAINER_WORKSPACE:-$(docker inspect -f '{{range .Mounts}}{{if eq .Sourc
 x() { docker exec -i -u "$user" "$DC" sh -c "$1"; }
 
 # ゲートを迂回して書き込めてしまう設定があれば、設定せずに止める
-x '[ ! -S /var/run/docker.sock ]' || die "devcontainer に docker.sock がマウントされています（ゲートのコンテナの中身を読めてしまう）。外してください"
+x '[ ! -S /var/run/docker.sock ] && [ ! -S /var/run/docker-host.sock ] && [ -z "${DOCKER_HOST:-}" ]' \
+  || die "devcontainer から Docker を操作できます（docker.sock・docker-host.sock・DOCKER_HOST。ゲートのコンテナの中身を読めてしまう）。外してください"
 x '! ls /tmp/vscode-ssh-auth-*.sock >/dev/null 2>&1 && [ -z "${SSH_AUTH_SOCK:-}" ]' \
   || die "devcontainer に SSH エージェントが転送されています（ホストの鍵で GitHub に直接 push できてしまう）。止めてください"
 
 # 鍵はホストのファイルを経由せず、ゲートから devcontainer へ直接渡す
+key=$(docker exec "$GATE" cat /config/client_key) && [ -n "$key" ] || die "ゲートからクライアント用の鍵を読めません"
 x 'umask 077 && mkdir -p ~/.ssh && cat > ~/.ssh/git-push-gate' <<EOF
-$(docker exec "$GATE" cat /config/client_key)
+$key
 EOF
 x "umask 077 && printf '%s\n' 'git-push-gate $hostkey' > ~/.ssh/git-push-gate_known_hosts
 cat > ~/.ssh/git-push-gate.conf <<'CONF'

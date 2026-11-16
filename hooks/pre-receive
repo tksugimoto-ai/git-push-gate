@@ -15,9 +15,18 @@ for b in $PROTECTED; do
   git rev-parse -q --verify "refs/heads/$b" >/dev/null || {
     echo "git-push-gate: 保護ブランチ $b が GitHub にありません。PROTECTED_BRANCHES を確認してください" >&2; exit 1; }
 done
+# デフォルトブランチ（master や trunk のこともある）が保護されていなければ受け付けない
+default=$(git ls-remote --symref upstream HEAD | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2 }')
+case " $PROTECTED " in
+  *" $default "*) ;;
+  *) echo "git-push-gate: デフォルトブランチ ${default:-（不明）} が PROTECTED_BRANCHES に入っていません" >&2; exit 1 ;;
+esac
 
-set --; checks=""
+set --; checks=""; log=""
+hex40() { printf '%s' "$1" | grep -Eqx '[0-9a-f]{40}'; }
 while read -r old new ref; do
+  # receive-pack は ref 名を検査する前にフックへ渡すので、行の形式から確かめる（改行を埋め込んだ ref 名など）
+  hex40 "$old" && hex40 "$new" || { echo "git-push-gate: 不正な更新の指定です" >&2; exit 1; }
   case "$ref" in
     refs/heads/*) ;;
     *) echo "git-push-gate: $ref は許可されていません（ブランチのみ）" >&2; exit 1 ;;
@@ -26,9 +35,10 @@ while read -r old new ref; do
   git check-ref-format "$ref" || { echo "git-push-gate: $ref は不正なブランチ名です" >&2; exit 1; }
   name=${ref#refs/heads/}
   # 人間やツールが取り違える名前（HEAD、refs/tags/v1 のようにタグや別の ref に見えるもの）は作らせない
-  case "$name" in
-    HEAD|refs/*) echo "git-push-gate: $ref は紛らわしい名前のため拒否" >&2; exit 1 ;;
-  esac
+  # 40 桁の 16 進数の名前は、push の指定でコミット ID と取り違えられる（検査したものと別のものが push される）
+  if [ "$name" = HEAD ] || [ "${name#refs/}" != "$name" ] || hex40 "$name"; then
+    echo "git-push-gate: $ref は紛らわしい名前のため拒否" >&2; exit 1
+  fi
   # 保護ブランチ（大文字・小文字だけが違う Main なども含む）
   for b in $PROTECTED; do
     if [ "$(lower "$name")" = "$(lower "$b")" ]; then
@@ -47,6 +57,8 @@ while read -r old new ref; do
   expect=$(git rev-parse -q --verify "$ref" || true)
   [ "$old" = "${expect:-$zero}" ] || { echo "git-push-gate: $ref は GitHub 側で更新されています。fetch してからやり直してください" >&2; exit 1; }
   set -- "$@" "--force-with-lease=$ref:$expect" "$spec"
+  log="$log$(date -u +%Y-%m-%dT%H:%M:%SZ) $ref $old $new
+"
 done
 
 [ $# -eq 0 ] && exit 0
@@ -57,3 +69,5 @@ if [ -n "$checks" ] && ! node "$CHECK" $checks; then
   exit 1
 fi
 git push --atomic --quiet upstream "$@"
+# 受け付けた更新の記録（人間が後で確かめられるように）。GitHub への push が成功したものだけ
+printf '%s' "$log" >> "$(git rev-parse --git-dir)/push-gate.log"

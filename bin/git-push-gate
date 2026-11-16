@@ -24,4 +24,5 @@ flock -w 300 9 || { echo "git-push-gate: ほかの push が終わらないため
 # これでクライアント側の fast-forward 判定と、pre-receive の lease が GitHub と一致する。
 git --git-dir="$REPO" fetch --prune --quiet upstream '+refs/heads/*:refs/heads/*'
 
-exec git-receive-pack "$REPO"
+# 止まったクライアントがロックを持ち続けないよう、push 全体（GitHub への push を含む）の時間に上限を付ける
+exec timeout 600 git-receive-pack "$REPO"

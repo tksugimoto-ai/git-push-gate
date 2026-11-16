@@ -1,11 +1,11 @@
-FROM alpine:3.20
+FROM alpine:3.24
 
 RUN apk add --no-cache git openssh-server openssh-client nodejs flock \
  && git config --system safe.directory /srv/git/repo.git \
  && adduser -D -s /bin/sh git && echo 'git:*' | chpasswd -e \
  && mkdir -p /home/git/.ssh /srv/git && chown -R git:git /home/git /srv/git \
  && sed -i 's/^Subsystem/#Subsystem/' /etc/ssh/sshd_config \
- && printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nAllowUsers git\nDisableForwarding yes\nAllowAgentForwarding no\n' >> /etc/ssh/sshd_config
+ && printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nAllowUsers git\nDisableForwarding yes\nAllowAgentForwarding no\nClientAliveInterval 30\nClientAliveCountMax 4\n' >> /etc/ssh/sshd_config
 
 WORKDIR /usr/local/share/git-push-gate
 COPY package.json package-lock.json ./

@@ -74,6 +74,7 @@ function checkWorkflow(path, text, fail) {
 
   // GitHub のパーサーとの解釈差を突かれないよう、曖昧な YAML は拒否
   // （%YAML 1.1 などのディレクティブがあると on が真偽値になる等、解釈が変わる）
+  if (text.startsWith('\uFEFF')) return fail('BOM で始まるファイルは使えません');
   if (/^%/m.test(text)) return fail('YAML のディレクティブ（%）は使えません');
   const doc = parseDocument(text, { version: '1.2', uniqueKeys: true, merge: false, prettyErrors: false });
   if (doc.errors.length || doc.warnings.length) return fail('YAML として不正または曖昧');

@@ -135,6 +135,16 @@ expect ng "refs/ で始まるブランチ名" origin odd:refs/heads/refs/tags/v1
 git --git-dir="$T/gate.git" config gate.protected " "
 expect ng "保護ブランチの一覧が空のときの削除" origin :develop
 git --git-dir="$T/gate.git" config gate.protected "main develop"
+wf w21 "$(printf '\357\273\277%%YAML 1.1\n---\n')$(echo "$OK" | sed 's/^on: .*/on: pull_request_target/')"; expect ng "BOM の後ろのディレクティブ" origin w21
+expect ng "40 桁の 16 進数のブランチ名" origin "odd:refs/heads/$(git rev-parse HEAD)"
+# デフォルトブランチ（main）が保護ブランチに入っていない
+git --git-dir="$T/gate.git" config gate.protected "develop"
+expect ng "デフォルトブランチが保護されていない" origin odd:refs/heads/odd2
+git --git-dir="$T/gate.git" config gate.protected "main develop"
+# フックに不正な形式の行が渡ったとき（receive-pack は ref 名を検査する前にフックへ渡す）
+if printf 'x refs/heads/main refs/heads/evil\n' | (cd "$T/gate.git" && GIT_DIR=. GIT_PUSH_GATE_CHECK="$ROOT/hooks/check-workflows.mjs" sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 \
+   || ! grep -q '不正な更新の指定' "$T/out"
+then fail=$((fail+1)); echo "FAIL 不正な形式の行は拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   不正な形式の行は拒否"; fi
 git switch -qC act origin/main; echo y >> .github/actions/a/action.yml; git commit -qam act
 expect ng ".github/actions の変更" origin act
 git switch -qC co origin/main; echo "* @me" > .github/CODEOWNERS; git add -A; git commit -qm co
@@ -153,5 +163,7 @@ if command -v ssh-agent >/dev/null; then
   kill "$SSH_AGENT_PID"
 fi
 
+if grep -q ' refs/heads/feat ' "$T/gate.git/push-gate.log" && ! grep -q 'refs/heads/main' "$T/gate.git/push-gate.log"
+then pass=$((pass+1)); echo "ok   受け付けた更新だけを記録"; else fail=$((fail+1)); echo "FAIL 受け付けた更新だけを記録"; cat "$T/gate.git/push-gate.log" 2>&1 | sed 's/^/     /'; fi
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

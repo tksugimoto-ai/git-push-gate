@@ -8,12 +8,17 @@ GitHub の Rulesets やブランチ保護が使えない環境（プランの制
 
 ゲートが守れるのは「エージェントの push」だけです。**GitHub Actions のワークフローが、エージェントの書き換えたコードを write 権限やシークレット付きで実行できると、ゲートの保証はすべてなくなります**（例: main と同じ内容の `on: push` + `contents: write` のワークフローを feature ブランチに置き、それが呼ぶスクリプトを `git push origin HEAD:main` に書き換える）。
 
+- リポジトリの Settings → Actions → General → **Workflow permissions を「Read repository contents and packages permissions」にする**。`permissions` を書いていない既存のワークフロー（`npm test` を実行するだけの CI など）が、write 権限のトークンで動かないようにするため。あわせて「Allow GitHub Actions to create and approve pull requests」を無効にする
 - write 権限やシークレットを持つワークフローは、保護ブランチへの `push` でだけ動くようにする（`branches: [main]` など）
 - そうしたワークフローを `pull_request` で動かさない（`branches: [main]` で絞っても、main 向けの PR では head 側のコードで動く）
 - `issue_comment` などで PR の head を checkout して実行するワークフローを置かない
 - 特権付きのワークフローを、パターン（`branches: ['release/**']` など）や保護していないブランチ名（`gh-pages` など）で動かさない。エージェントはそういう名前のブランチを作れる（`PROTECTED_BRANCHES` にパターンは書けない）
 - デフォルトブランチの `workflow_run` や `on: create` / `delete` のワークフローで、エージェントの push で動いた実行の成果物やブランチ名を、特権付きで使わない
 - 設定変数（`vars`）に機密情報を置かない。シークレットと違い、エージェントのワークフローから読める
+- 再利用可能なワークフロー（`on: workflow_call`）に、`environment:`・write 権限・セルフホストのランナーを持たせない。エージェントが書いたワークフローから `uses: ./.github/workflows/...` で呼べる（呼ばれる側は保護ブランチと同じ内容なら検査されない）
+- デフォルトブランチの `pull_request_target` のワークフローは、エージェントが自分のブランチを base にした PR を作るだけで動く。PR の head を checkout しなくても、特権付きで動くことを前提に中身を確認する
+- ブランチの内容を使って動く外部のアプリ（自動マージのボット、`gh-pages` からの Pages の公開など）も、エージェントが push したブランチで動きうる
+- マージは、レビューしたコミットに限る（`gh pr merge --match-head-commit <SHA>` など）。保護ブランチがないので、レビューの後、マージの直前にエージェントが PR のブランチに push できる
 
 ゲートは、エージェントが**変更した**ワークフローを検査しますが、保護ブランチと同じ内容のワークフローが実行するコード（スクリプトや `.github/actions` 以外のローカルアクション）は検査しません。また、検査するのは push されたブランチの先端のコミットだけです。途中のコミットに危険なワークフローがあっても、ブランチがそれを指さない限り動かないためで、エージェントがゲート以外で ref を作れない（PR 用のトークンが Contents: read）ことが前提です。
 
@@ -29,7 +34,9 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 - エージェントの SSH 鍵は `authorized_keys` の強制コマンドで `git-push-gate` に固定され、push（`git-receive-pack`）以外は実行できません。
 - push を受け付ける前に GitHub の最新状態を fetch するので、fast-forward の判定は GitHub と一致します。
 - `pre-receive` フックが検査し、通った更新だけをその場で GitHub に push します（`--atomic` と `--force-with-lease`）。lease には、クライアントが送ってきた値ではなく、直前に fetch した GitHub の値を使います。GitHub 側で失敗すればエージェントの push も失敗します。
-- 保護ブランチが GitHub に 1 つでもなければ（名前の間違いなど）、push を受け付けません。何も守らないまま動くのを防ぐためです。
+- 保護ブランチが GitHub に 1 つでもなければ（名前の間違いなど）、またはデフォルトブランチが保護ブランチに入っていなければ、push を受け付けません。何も守らないまま動くのを防ぐためです。
+- GitHub に push できた更新は、ゲートの `/srv/git/repo.git/push-gate.log` に記録します（`docker compose exec git-push-gate cat /srv/git/repo.git/push-gate.log`）。
+- push 全体（GitHub への push を含む）は 10 分で打ち切ります。止まったクライアントが、ほかの push を待たせ続けないためです。
 
 ## 拒否するもの
 
@@ -115,7 +122,7 @@ docker compose exec git-push-gate unlock
 | 環境変数 | 説明 |
 |---|---|
 | `UPSTREAM` | 必須。例: `git@github.com:owner/repo.git` |
-| `PROTECTED_BRANCHES` | 保護するブランチ（空白区切り、完全一致。`release/*` のようなパターンは使えない）。すべて GitHub に存在すること（ないと push を受け付けない）。既定 `main develop` |
+| `PROTECTED_BRANCHES` | 保護するブランチ（空白区切り、完全一致。`release/*` のようなパターンは使えない）。すべて GitHub に存在し、デフォルトブランチを含むこと（そうでないと push を受け付けない）。既定 `main develop` |
 | `UNLOCK_LIFETIME` | パスフレーズ付きの鍵を解除しておく時間（例: `8h`）。既定は無期限 |
 
 | マウント先 | 内容 |
@@ -180,7 +187,7 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
    - `~/.ssh/config` の `Host git-push-gate`（公開先が `127.0.0.1` なら `host.docker.internal`、それ以外はその IP）
    - `git remote set-url --push origin ssh://git@git-push-gate/repo.git`
 
-   docker.sock や SSH エージェントの転送が見つかれば、設定せずに止めます。最後にゲートへの接続を確かめ、VS Code の git credential helper が有効なら警告します。devcontainer やゲートが自動で見つからないときは、環境変数 `DEVCONTAINER`・`GATE` などで指定します（スクリプトの先頭を参照）。Windows では WSL のシェルから実行してください。
+   devcontainer から Docker を操作できる（`docker.sock`・`docker-host.sock`・`DOCKER_HOST`）か、SSH エージェントが転送されていれば、設定せずに止めます。最後にゲートへの接続を確かめ、VS Code の git credential helper が有効なら警告します。devcontainer やゲートが自動で見つからないときは、環境変数 `DEVCONTAINER`・`GATE` などで指定します（スクリプトの先頭を参照）。Windows では WSL のシェルから実行してください。
 
 ゲートのホスト鍵は `/srv/git` のボリュームに保存されるので、コンテナを作り直しても変わりません。
 
@@ -204,6 +211,7 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 - 保護していないブランチは、人間が作ったものでもエージェントが強制 push・削除できます（意図した仕様です）。
 - main にある既存のワークフローで、`issue_comment` や `pull_request_review` などで動いて PR の head を checkout するものは、エージェントが PR を作れるので危険です（head 側のコードが base 側の権限で動く）。
 - ソースコードの外部送信は防げません。
+- Git LFS は使えません（LFS のオブジェクトは HTTPS で送るので、ゲートを通らず、読み取り専用のトークンでは送れない）。
 
 ## 今後の課題
 
