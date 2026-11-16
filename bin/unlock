@@ -1,0 +1,12 @@
+#!/bin/sh
+# ホストから実行する: docker compose exec git-push-gate unlock
+# パスフレーズ付きの GitHub 用の鍵を、コンテナ内の ssh-agent に読み込ませる（コンテナを止めるまで有効）。
+set -eu
+REPO=/srv/git/repo.git
+SOCK=$(git -c safe.directory="$REPO" --git-dir="$REPO" config --get gate.agentSocket || true)
+if [ -z "$SOCK" ]; then
+  echo "unlock: パスフレーズなしの鍵なので、解除は不要です"
+  exit 0
+fi
+# UNLOCK_LIFETIME（例: 8h）を指定すると、その時間で自動的に再ロックされる
+exec su -s /bin/sh git -c "SSH_AUTH_SOCK=$SOCK ssh-add ${UNLOCK_LIFETIME:+-t $UNLOCK_LIFETIME} /home/git/.ssh/github_key"

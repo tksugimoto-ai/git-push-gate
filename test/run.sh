@@ -99,5 +99,18 @@ expect ng ".github/actions の変更" origin act
 git switch -qC co origin/main; echo "* @me" > .github/CODEOWNERS; git add -A; git commit -qm co
 expect ok "CODEOWNERS の変更" origin co
 
+# パスフレーズ付きの鍵が未解除のとき
+if command -v ssh-agent >/dev/null; then
+  eval "$(ssh-agent -a "$T/agent.sock")" >/dev/null
+  git --git-dir="$T/gate.git" config gate.agentSocket "$T/agent.sock"
+  git switch -qC locked origin/main; echo l > l; git add l; git commit -qm l
+  expect ng "鍵のロック中" origin locked
+  grep -q 'ロックされています' "$T/out" || { echo "FAIL ロックのメッセージがない"; fail=$((fail+1)); }
+  ssh-keygen -q -t ed25519 -N '' -f "$T/k"; SSH_AUTH_SOCK="$T/agent.sock" ssh-add -q "$T/k" 2>/dev/null
+  expect ok "鍵の解除後" origin locked
+  git --git-dir="$T/gate.git" config --unset gate.agentSocket
+  kill "$SSH_AGENT_PID"
+fi
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

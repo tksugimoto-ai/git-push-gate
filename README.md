@@ -49,9 +49,9 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 dir=~/.config/git-push-gate/REPO
 mkdir -p "$dir" && cd "$dir"
 
-# GitHub 用の鍵（この用途専用に作る）
-ssh-keygen -t ed25519 -N '' -C git-push-gate -f github_key
-# → github_key.pub を GitHub に登録（可能なら書き込み可の Deploy key、無理ならアカウントの SSH 鍵）
+# GitHub 用の鍵（この用途専用に作る。パスフレーズは付けても付けなくてもよい）
+ssh-keygen -t ed25519 -C git-push-gate -f github_key
+# → github_key.pub を GitHub に登録（下記「GitHub 用の鍵の選び方」を参照）
 
 # GitHub のホスト鍵。表示されたフィンガープリントを GitHub のドキュメントと照合すること
 ssh-keyscan -t ed25519 github.com > known_hosts
@@ -61,8 +61,25 @@ ssh-keygen -lf known_hosts
 cp /path/to/devcontainer_key.pub client_keys.pub
 ```
 
-> [!WARNING]
-> アカウントに登録した SSH 鍵は、そのアカウントが書き込めるすべてのリポジトリに書き込めます。既存の鍵は使い回さず、専用の鍵を作ってください。
+#### パスフレーズ
+
+パスフレーズ付きの鍵の場合は `github_key.pub` も同じディレクトリに置いてください。起動後は鍵がロックされた状態になり、エージェントからの push は「ロックされています」というエラーで止まります。ホストで一度だけ次を実行すると、コンテナを止めるまで有効になります。
+
+```sh
+docker compose exec git-push-gate unlock
+```
+
+環境変数 `UNLOCK_LIFETIME`（例: `8h`）を指定すると、その時間が経つと自動で再ロックされます。
+
+#### GitHub 用の鍵の選び方
+
+| 方法 | 書き込める範囲 | 手間 |
+|---|---|---|
+| Deploy key（書き込み可） | 対象リポジトリだけ | リポジトリの管理者権限が必要 |
+| マシンユーザーの SSH 鍵 | 招待されたリポジトリだけ | アカウントの作成と招待が必要 |
+| 自分のアカウントに専用の鍵を追加 | 自分が書き込めるすべてのリポジトリ | 鍵を登録するだけ |
+
+自分のアカウントの鍵でも、ホストにはもともと同じ範囲の認証情報（普段の push に使っているもの）があり、エージェントからは読めない場所に置くので、増えるリスクは「ホスト上の鍵ファイルが 1 つ増える」ことです。既存の鍵は使い回さず、漏れたときにそれだけ取り消せる専用の鍵にしてください。
 
 ### 2. compose に追加する
 
@@ -72,10 +89,11 @@ cp /path/to/devcontainer_key.pub client_keys.pub
 |---|---|
 | `UPSTREAM` | 必須。例: `git@github.com:owner/repo.git` |
 | `PROTECTED_BRANCHES` | 保護するブランチ（空白区切り）。既定 `main develop` |
+| `UNLOCK_LIFETIME` | パスフレーズ付きの鍵を解除しておく時間（例: `8h`）。既定は無期限 |
 
 | マウント先 | 内容 |
 |---|---|
-| `/config` | `github_key`, `known_hosts`, `client_keys.pub`（読み取り専用で可） |
+| `/config` | `github_key`, `known_hosts`, `client_keys.pub`、パスフレーズ付きなら `github_key.pub`（読み取り専用で可） |
 | `/srv/git` | 中継用の bare リポジトリ（ボリューム推奨） |
 
 ### 3. devcontainer 側の remote を設定する

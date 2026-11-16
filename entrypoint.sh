@@ -4,14 +4,37 @@ set -eu
 PROTECTED="${PROTECTED_BRANCHES:-main develop}"
 CONFIG=/config          # github_key, client_keys.pub, known_hosts を置いたディレクトリ（読み取り専用でマウント）
 REPO=/srv/git/repo.git
+# root で git ユーザー所有のリポジトリを操作するため safe.directory を指定
+g() { git -c safe.directory="$REPO" --git-dir="$REPO" "$@"; }
 
 for f in github_key client_keys.pub known_hosts; do
   [ -s "$CONFIG/$f" ] || { echo "entrypoint: $CONFIG/$f がありません" >&2; exit 1; }
 done
 
+KEY=/home/git/.ssh/github_key
+AGENT_DIR=/run/git-push-gate
+SSH_OPTS="-o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/github_known_hosts"
+
 # GitHub 用の秘密鍵とホスト鍵（git ユーザーだけが読める）
-install -o git -g git -m 600 "$CONFIG/github_key" /home/git/.ssh/github_key
+install -o git -g git -m 600 "$CONFIG/github_key" "$KEY"
 install -o root -g root -m 644 "$CONFIG/known_hosts" /etc/ssh/github_known_hosts
+
+if ssh-keygen -y -P '' -f "$KEY" >/dev/null 2>&1; then
+  # パスフレーズなし: 鍵ファイルを直接使う
+  ssh_cmd="ssh -i $KEY $SSH_OPTS"
+  agent_sock=""
+else
+  # パスフレーズ付き: コンテナ内の ssh-agent に、人間が unlock で一度だけ読み込ませる
+  [ -s "$CONFIG/github_key.pub" ] || { echo "entrypoint: パスフレーズ付きの鍵には $CONFIG/github_key.pub も必要です" >&2; exit 1; }
+  install -o git -g git -m 644 "$CONFIG/github_key.pub" "$KEY.pub"
+  install -d -o git -g git -m 700 "$AGENT_DIR"
+  agent_sock="$AGENT_DIR/agent.sock"
+  rm -f "$agent_sock"
+  su -s /bin/sh git -c "ssh-agent -a $agent_sock" >/dev/null
+  # -i に公開鍵を渡すと、エージェント内の対応する鍵だけを使う
+  ssh_cmd="ssh -i $KEY.pub -o IdentityAgent=$agent_sock $SSH_OPTS"
+  echo "entrypoint: 鍵はロックされています。ホストで次を実行してください: docker compose exec git-push-gate unlock" >&2
+fi
 
 # クライアント（devcontainer）の公開鍵を、強制コマンド付きで登録
 grep -Ev '^[[:space:]]*(#|$)' "$CONFIG/client_keys.pub" \
@@ -19,10 +42,14 @@ grep -Ev '^[[:space:]]*(#|$)' "$CONFIG/client_keys.pub" \
 chown git:git /home/git/.ssh/authorized_keys && chmod 600 /home/git/.ssh/authorized_keys
 
 [ -d "$REPO" ] || git init -q --bare "$REPO"
-git --git-dir="$REPO" config remote.upstream.url "$UPSTREAM"   # fetch refspec は付けない
-git --git-dir="$REPO" config core.sshCommand \
-  "ssh -i /home/git/.ssh/github_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/github_known_hosts"
-git --git-dir="$REPO" config gate.protected "$PROTECTED"
+g config remote.upstream.url "$UPSTREAM"   # fetch refspec は付けない
+g config core.sshCommand "$ssh_cmd"
+if [ -n "$agent_sock" ]; then
+  g config gate.agentSocket "$agent_sock"
+else
+  g config --unset gate.agentSocket || true
+fi
+g config gate.protected "$PROTECTED"
 install -o root -g root -m 755 /usr/local/share/git-push-gate/pre-receive "$REPO/hooks/pre-receive"
 chown -R git:git "$REPO"
 chown root:root "$REPO/hooks" "$REPO/hooks/pre-receive" "$REPO/config"

@@ -9,6 +9,13 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
   *) echo "git-push-gate: このコマンドは許可されていません（push のみ）" >&2; exit 1 ;;
 esac
 
+# パスフレーズ付きの鍵がまだ unlock されていなければ、分かりやすいエラーで止める
+SOCK=$(git --git-dir="$REPO" config --get gate.agentSocket || true)
+if [ -n "$SOCK" ] && ! SSH_AUTH_SOCK="$SOCK" ssh-add -l >/dev/null 2>&1; then
+  echo "git-push-gate: GitHub 用の鍵がロックされています。人間がホストで docker compose exec git-push-gate unlock を実行してください" >&2
+  exit 1
+fi
+
 # 同時 push を直列化（fd 9 は receive-pack に引き継がれ、終了までロックを保持）
 exec 9>"$REPO/push-gate.lock"
 flock 9
