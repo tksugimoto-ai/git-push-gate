@@ -102,7 +102,7 @@ docker compose exec git-push-gate unlock
 
 | マウント先 | 内容 |
 |---|---|
-| `/config` | `github_key`, `known_hosts`, `client_keys.pub`、パスフレーズ付きなら `github_key.pub`（読み取り専用で可） |
+| `/config` | `github_key`, `known_hosts`, `client_keys.pub`、パスフレーズ付きなら `github_key.pub`、`client/attach.sh` を使うなら `client_key`（読み取り専用で可） |
 | `/srv/git` | 中継用の bare リポジトリと sshd のホスト鍵（ボリューム推奨） |
 
 ### 3. devcontainer 側の remote を設定する
@@ -125,7 +125,6 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
    docker info --format '{{.OperatingSystem}}'   # Docker Desktop か、それ以外か
    echo GATE_BIND=172.17.0.1 > .env               # Docker Desktop 以外のときだけ（docker0 の IP）
    docker compose up -d
-   docker compose exec git-push-gate ssh-keygen -lf /srv/git/ssh_host_keys/ssh_host_ed25519_key.pub
    ```
 
    | Docker | 公開先（`GATE_BIND`） | devcontainer から見たゲート |
@@ -135,18 +134,30 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 
    `0.0.0.0` には公開しないでください（LAN に公開されます）。Docker Desktop の経路は未検証です。
 
-2. devcontainer の中で、クライアント用の鍵と push 先とホスト鍵を設定します。どれも `~/.ssh` と `.git/config` に入るので、コミットされません。
+   クライアント用の鍵は、この設定ディレクトリに 1 つだけ作ります（devcontainer をリビルドしても作り直さない）。
 
    ```sh
-   ssh-keygen -t ed25519 -N '' -f ~/.ssh/git-push-gate   # 公開鍵をホストの config/client_keys.pub に追記し、docker compose restart
-   git config core.sshCommand 'ssh -i ~/.ssh/git-push-gate -o IdentitiesOnly=yes'
-   getent hosts host.docker.internal >/dev/null && h=host.docker.internal || h=$(ip route | awk '/default/{print $3}')
-   git remote set-url --push origin "ssh://git@$h:2222/repo.git"
-   ssh-keyscan -p 2222 -t ed25519 "$h" >> ~/.ssh/known_hosts
-   ssh-keygen -lf ~/.ssh/known_hosts   # 1. で表示したフィンガープリントと照合する
+   ssh-keygen -t ed25519 -N '' -C git-push-gate-client -f config/client_key
+   cat config/client_key.pub >> config/client_keys.pub
+   docker compose restart
    ```
 
-ゲートのホスト鍵は `/srv/git` のボリュームに保存されるので、コンテナを作り直しても変わりません。一方、devcontainer の `~/.ssh` はリビルドで消えるので、そのたびに 2. をやり直します（鍵を作り直したら `client_keys.pub` も差し替えます）。
+2. devcontainer を起動したら（リビルドのたびに）、ホストで、このリポジトリを clone したディレクトリから、ワークスペースのディレクトリを指定して [client/attach.sh](client/attach.sh) を実行します。
+
+   ```sh
+   sh client/attach.sh ~/src/REPO
+   ```
+
+   次を `docker exec` で devcontainer に設定します。どれも `~/.ssh` と `.git/config` に入るので、利用側のリポジトリにはコミットされません。
+
+   - クライアント用の鍵（ゲートのコンテナから直接渡す）
+   - ゲートのホスト鍵（ゲートから読むので、フィンガープリントの照合は不要）
+   - `~/.ssh/config` の `Host git-push-gate`（公開先が `127.0.0.1` なら `host.docker.internal`、それ以外はその IP）
+   - `git remote set-url --push origin ssh://git-push-gate/repo.git`
+
+   最後にゲートへの接続を確かめ、SSH エージェントの転送・docker.sock・VS Code の git credential helper が見つかれば警告します。devcontainer やゲートが自動で見つからないときは、環境変数 `DEVCONTAINER`・`GATE` などで指定します（スクリプトの先頭を参照）。Windows では WSL のシェルから実行してください。
+
+ゲートのホスト鍵は `/srv/git` のボリュームに保存されるので、コンテナを作り直しても変わりません。
 
 ## devcontainer 側で必要な設定
 

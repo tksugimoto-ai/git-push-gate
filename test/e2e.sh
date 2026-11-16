@@ -10,7 +10,7 @@ T=$(mktemp -d)
 NET="$P-net"
 
 cleanup() {
-  docker rm -f "$P-github" "$P-gate" >/dev/null 2>&1 || true
+  docker rm -f "$P-github" "$P-gate" "$P-dev" >/dev/null 2>&1 || true
   docker volume rm -f "$P-data" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   # コンテナ内で root が作ったファイルを消す
@@ -36,7 +36,8 @@ run 'ssh-keygen -q -t ed25519 -N "" -C gate -f /w/github_key_plain
      ssh-keygen -q -t ed25519 -N "" -C client -f /w/client/id_ed25519
      cat /w/github_key_plain.pub /w/github_key_pp.pub > /w/github/authorized_keys
      cp /w/client/id_ed25519.pub /w/github/client.pub
-     cp /w/client/id_ed25519.pub /w/config/client_keys.pub'
+     cp /w/client/id_ed25519.pub /w/config/client_keys.pub
+     cp /w/client/id_ed25519 /w/config/client_key'
 
 # 「GitHub」: ネットワーク上の名前は github.com
 docker run -d --name "$P-github" --network "$NET" --network-alias github.com \
@@ -120,6 +121,23 @@ if docker run --rm -v "$T:/w" --entrypoint sh "$IMAGE" -c "set -e
     git -c user.name=t -c user.email=t@example.com commit -qm x
     git push -q ssh://git@\$h:$PORT/repo.git bridge" >"$T/out" 2>&1 && gh_has bridge
 then ok "既定の bridge からゲートウェイ経由で push できる"; else ng "既定の bridge からゲートウェイ経由で push できる"; fi
+
+# client/attach.sh: VS Code が作る devcontainer に見立てたコンテナの push 先をゲートに向ける
+mkdir -p "$T/ws"
+docker run -d --name "$P-dev" -v "$T/ws:/workspaces/ws" \
+  --label "devcontainer.local_folder=$T/ws" --label 'devcontainer.metadata=[{"remoteUser":"dev"}]' \
+  --entrypoint sh "$IMAGE" -c 'adduser -D -u 1001 dev && sleep 1000000' >/dev/null
+until docker exec "$P-dev" id dev >/dev/null 2>&1; do sleep 1; done
+docker exec "$P-dev" sh -c 'chown dev /workspaces/ws && su dev -c "cd /workspaces/ws && git init -q -b attached &&
+  git remote add origin https://github.invalid/repo.git && echo x > x && git add x &&
+  git -c user.name=t -c user.email=t@example.com commit -qm x"'
+if GATE="$P-gate" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
+   docker exec -u dev -w /workspaces/ws "$P-dev" git push -q origin attached >>"$T/out" 2>&1 && gh_has attached
+then ok "attach.sh で設定した devcontainer から push できる"; else ng "attach.sh で設定した devcontainer から push できる"; fi
+if GATE="$P-gate" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
+   [ "$(docker exec -u dev "$P-dev" grep -c git-push-gate.conf /home/dev/.ssh/config)" = 1 ]
+then ok "attach.sh は 2 回実行しても設定が重複しない"; else ng "attach.sh は 2 回実行しても設定が重複しない"; fi
+docker rm -f "$P-dev" >/dev/null
 
 # --- パスフレーズ付きの鍵 ---
 start_gate github_key_pp -e UNLOCK_LIFETIME=1h
