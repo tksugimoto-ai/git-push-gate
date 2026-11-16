@@ -1,6 +1,6 @@
 FROM alpine:3.20
 
-RUN apk add --no-cache git openssh-server openssh-client nodejs \
+RUN apk add --no-cache git openssh-server openssh-client nodejs flock \
  && git config --system safe.directory /srv/git/repo.git \
  && adduser -D -s /bin/sh git && echo 'git:*' | chpasswd -e \
  && mkdir -p /home/git/.ssh /srv/git && chown -R git:git /home/git /srv/git \

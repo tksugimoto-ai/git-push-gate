@@ -97,6 +97,33 @@ permissions: write-all";                                           expect ng "�
 wf w8 "$(echo "$OK" | sed 's/^permissions:/x: \&p write-all\npermissions:/')"; expect ng "アンカー" origin w8
 git switch -qC w9 origin/main; printf 'on: pull_request_target\npermissions: write-all\njobs: {}\n' > ".github/workflows/$(printf '\303\251').yml"
 git add -A; git commit -qm w9;                                     expect ng "ASCII 以外を含むファイル名" origin w9
+# YAML の書き方でポリシーを回避しようとするもの
+wf w10 "$(echo "$OK" | sed 's/npm test/"echo ${{ toJSON(\\x73ecrets) }}"/')"; expect ng "エスケープで書いた secrets" origin w10
+wf w11 "%YAML 1.1
+---
+$(echo "$OK" | sed 's/^on: .*/on: pull_request_target/')";        expect ng "YAML 1.1 のディレクティブ" origin w11
+wf w12 "$(echo "$OK" | sed 's/^on: .*/On: pull_request_target/')"; expect ng "大文字の On:" origin w12
+wf w13 "$(echo "$OK" | sed 's/^on: .*/on: Pull_Request_Target/')"; expect ng "大文字を混ぜたトリガー名" origin w13
+wf w14 "$(echo "$OK" | sed 's/^jobs:/Jobs:/; s/ubuntu-latest/self-hosted/')"; expect ng "大文字の Jobs:" origin w14
+wf w15 "$(echo "$OK" | sed 's/runs-on: ubuntu-latest/Runs-On: self-hosted/')"; expect ng "大文字の Runs-On:" origin w15
+wf w16 "on: push
+permissions: {contents: read}
+jobs:
+  t:
+    uses: evil/repo/.github/workflows/x.yml@main"; expect ng "外部の再利用可能なワークフロー" origin w16
+wf w17 "on: push
+permissions: {contents: read}
+jobs:
+  t:
+    uses: ./.github/workflows/ci.yml";             expect ok "同じリポジトリの再利用可能なワークフロー" origin w17
+git switch -qC w18 origin/main; git rm -rq .github/workflows; mkdir -p wfdir
+printf 'on: pull_request_target\npermissions: write-all\njobs: {}\n' > wfdir/x.yml; ln -s ../wfdir .github/workflows
+git add -A; git commit -qm w18;                                    expect ng ".github/workflows がシンボリックリンク" origin w18
+# 名前を間違えた保護ブランチ
+git --git-dir="$T/gate.git" config gate.protected "main develop nosuch"
+git switch -qC typo origin/main; echo t > t; git add t; git commit -qm typo
+expect ng "GitHub にない保護ブランチ" origin typo
+git --git-dir="$T/gate.git" config gate.protected "main develop"
 git switch -qC act origin/main; echo y >> .github/actions/a/action.yml; git commit -qam act
 expect ng ".github/actions の変更" origin act
 git switch -qC co origin/main; echo "* @me" > .github/CODEOWNERS; git add -A; git commit -qm co

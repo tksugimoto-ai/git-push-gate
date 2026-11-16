@@ -18,7 +18,7 @@ fi
 
 # 同時 push を直列化（fd 9 は receive-pack に引き継がれ、終了までロックを保持）
 exec 9>"$REPO/push-gate.lock"
-flock 9
+flock -w 300 9 || { echo "git-push-gate: ほかの push が終わらないため中止しました" >&2; exit 1; }
 
 # GitHub の最新状態を反映してから受け付ける。
 # これでクライアント側の fast-forward 判定と、pre-receive の lease が GitHub と一致する。

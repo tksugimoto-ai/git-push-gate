@@ -16,7 +16,8 @@ done
 
 KEY=/home/git/.ssh/github_key
 AGENT_DIR=/run/git-push-gate
-SSH_OPTS="-o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/github_known_hosts"
+# 止まった接続が後の push をすべて待たせないよう、タイムアウトを付ける（BatchMode: 対話的な入力を求めない）
+SSH_OPTS="-o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/github_known_hosts -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 
 # GitHub 用の秘密鍵とホスト鍵（git ユーザーだけが読める）
 install -o git -g git -m 600 "$CONFIG/github_key" "$KEY"

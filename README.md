@@ -15,7 +15,8 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 - GitHub に書き込める鍵は git-push-gate コンテナだけが持ち、エージェントの環境には置きません。
 - エージェントの SSH 鍵は `authorized_keys` の強制コマンドで `git-push-gate` に固定され、push（`git-receive-pack`）以外は実行できません。
 - push を受け付ける前に GitHub の最新状態を fetch するので、fast-forward の判定は GitHub と一致します。
-- `pre-receive` フックが検査し、通った更新だけをその場で GitHub に push します（`--atomic` と `--force-with-lease`）。GitHub 側で失敗すればエージェントの push も失敗します。
+- `pre-receive` フックが検査し、通った更新だけをその場で GitHub に push します（`--atomic` と `--force-with-lease`）。lease には、クライアントが送ってきた値ではなく、直前に fetch した GitHub の値を使います。GitHub 側で失敗すればエージェントの push も失敗します。
+- 保護ブランチが GitHub に 1 つでもなければ（名前の間違いなど）、push を受け付けません。何も守らないまま動くのを防ぐためです。
 
 ## 拒否するもの
 
@@ -28,14 +29,16 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 
 ### ワークフローのポリシー
 
-保護ブランチのどれとも内容が異なるワークフローファイルだけを検査します。次のどれかに当てはまると拒否します。
+保護ブランチのどれとも内容が異なるワークフローファイルだけを検査します。知らないものは拒否する方針で、次のどれかに当てはまると拒否します。
 
 - トップレベルの `permissions` がない、またはどこかに write がある（job 単位・`write-all` を含む）
-- ファイル内に `secrets` という文字列がある
-- `pull_request_target` / `workflow_run` トリガー
-- `environment:` の指定
+- `secrets` という文字列がある（ファイルの文字列と、`"\x73ecrets"` のようなエスケープを解釈した後の値の両方を見る）
+- 許可していないトリガー。許可するのは `push` / `pull_request` / `pull_request_review` / `pull_request_review_comment` / `workflow_dispatch` / `workflow_call` / `merge_group` だけ（`pull_request_target` / `workflow_run` などは不可）
+- 許可していないキー（トップレベル・job とも。大文字の `On:` や `Runs-On:` も不可）。`environment:` も不可
 - GitHub ホストのランナー（`ubuntu-*` / `windows-*` / `macos-*`）以外の `runs-on`（self-hosted や式を含む）
-- 重複キー・アンカー・エイリアス・タグなどの曖昧な YAML
+- job の `uses:` で、同じコミットの `./.github/workflows/` 以外の再利用可能なワークフローを呼ぶ（外部のものは中身を検査できない）
+- 重複キー・アンカー・エイリアス・タグ・ディレクティブ（`%YAML 1.1` など）を使った曖昧な YAML
+- `.github` や `.github/workflows` がシンボリックリンクなど、ディレクトリでない
 
 ワークフローを経由した書き込み（Actions の `GITHUB_TOKEN` で main に push する等）やシークレットの持ち出しを防ぐためです。拒否されたコミットはエージェントの手元に残るので、必要なら人間が push してください。
 
@@ -97,7 +100,7 @@ docker compose exec git-push-gate unlock
 | 環境変数 | 説明 |
 |---|---|
 | `UPSTREAM` | 必須。例: `git@github.com:owner/repo.git` |
-| `PROTECTED_BRANCHES` | 保護するブランチ（空白区切り、完全一致。`release/*` のようなパターンは使えない）。既定 `main develop` |
+| `PROTECTED_BRANCHES` | 保護するブランチ（空白区切り、完全一致。`release/*` のようなパターンは使えない）。すべて GitHub に存在すること（ないと push を受け付けない）。既定 `main develop` |
 | `UNLOCK_LIFETIME` | パスフレーズ付きの鍵を解除しておく時間（例: `8h`）。既定は無期限 |
 
 | マウント先 | 内容 |
@@ -106,6 +109,13 @@ docker compose exec git-push-gate unlock
 | `/srv/git` | 中継用の bare リポジトリと sshd のホスト鍵（ボリューム推奨） |
 
 ### 3. devcontainer 側の remote を設定する
+
+devcontainer に、クライアント用の秘密鍵（`client_keys.pub` に登録したものと対）と、ゲートのホスト鍵を置きます。どちらもワークスペースの外（`~/.ssh` など）に置いてください。ゲートのホスト鍵は、ホストで次のように取り出せます（`git-push-gate` は compose のサービス名）。
+
+```sh
+docker compose exec git-push-gate cat /srv/git/ssh_host_keys/ssh_host_ed25519_key.pub | awk '{print "git-push-gate", $1, $2}'
+# → devcontainer の ~/.ssh/known_hosts に追記する
+```
 
 ```sh
 git remote set-url origin https://github.com/owner/repo.git     # fetch は GitHub から直接
@@ -166,12 +176,18 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 - VS Code の `dev.containers.gitCredentialHelperConfigLocation` を `none` にする（ホストの認証情報の自動転送を止める）
 - SSH エージェントを転送しない
 - `docker.sock` をマウントしない
-- エージェントに渡す GitHub トークン（PR 作成用など）は **Contents: read** にする。Contents: write はマージや API 経由のコミットも許してしまう
+- エージェントに渡す GitHub トークン（PR 作成用など）は、対象のリポジトリだけに絞った fine-grained PAT にする
+  - **Contents: read**。Contents: write はマージや API 経由のコミットも許してしまう
+  - PR を作るなら **Pull requests: write**（PR の作成・コメントだけで、マージには Contents: write が要る）
+  - **Actions: write は付けない**（`workflow_dispatch` や再実行で、保護ブランチのワークフローを動かせてしまう）
+  - classic PAT の `repo` スコープは書き込みも含むので使わない
 
 ## 限界
 
 - クライアント側のガードではなくサーバー側の強制ですが、GitHub のブランチ保護の代わりにはなりません。使えるならそちらが確実です。
 - ワークフローが実行するコード（`npm test` から呼ばれるスクリプト、`.github/actions` 以外に置いたローカルアクション（`uses: ./tools/x` など）等）はエージェントが変更できます。write 権限やシークレットを持つ既存ワークフローは、保護ブランチへの push でだけ動くようにしてください。`pull_request` は base ブランチで絞り込むので、`branches: [main]` でも main 向けの PR では head 側のコードで動く点に注意してください。
+- 保護していないブランチは、人間が作ったものでもエージェントが強制 push・削除できます（意図した仕様です）。
+- main にある既存のワークフローで、`issue_comment` や `pull_request_review` などで動いて PR の head を checkout するものは、エージェントが PR を作れるので危険です（head 側のコードが base 側の権限で動く）。
 - ソースコードの外部送信は防げません。
 
 ## テスト

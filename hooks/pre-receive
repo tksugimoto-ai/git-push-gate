@@ -6,6 +6,11 @@ zero=0000000000000000000000000000000000000000
 CHECK="${GIT_PUSH_GATE_CHECK:-/usr/local/share/git-push-gate/check-workflows.mjs}"   # 環境変数はテスト用
 # 保護ブランチは entrypoint がリポジトリの設定に書き込む（sshd 経由では環境変数が届かないため）
 PROTECTED=$(git config --get gate.protected) || { echo "git-push-gate: gate.protected が設定されていません" >&2; exit 1; }
+# 名前を間違えた保護ブランチは何も守らないので、GitHub にない保護ブランチがあれば受け付けない（直前に fetch 済み）
+for b in $PROTECTED; do
+  git rev-parse -q --verify "refs/heads/$b" >/dev/null || {
+    echo "git-push-gate: 保護ブランチ $b が GitHub にありません。PROTECTED_BRANCHES を確認してください" >&2; exit 1; }
+done
 
 set --; checks=""
 while read -r old new ref; do
@@ -13,6 +18,8 @@ while read -r old new ref; do
     refs/heads/*) ;;
     *) echo "git-push-gate: $ref は許可されていません（ブランチのみ）" >&2; exit 1 ;;
   esac
+  # 空白などを含む不正な名前は、後で $checks を分割するときにずれるので先に拒否
+  git check-ref-format "$ref" || { echo "git-push-gate: $ref は不正なブランチ名です" >&2; exit 1; }
   for b in $PROTECTED; do
     if [ "$ref" = "refs/heads/$b" ]; then
       echo "git-push-gate: $ref への push は禁止" >&2; exit 1
@@ -25,8 +32,10 @@ while read -r old new ref; do
     checks="$checks $ref $new"         # .github/actions と .github/workflows は後でまとめて検査
     spec="$new:$ref"
   fi
-  # 直前に fetch した GitHub の値を lease にする（その間に誰かが push していたら失敗）
-  [ "$old" = "$zero" ] && expect="" || expect="$old"
+  # 直前に fetch した GitHub の値を lease にする（その間に誰かが push していたら失敗）。
+  # クライアントが送ってきた old は信用せず、fetch した値と一致することを確かめる
+  expect=$(git rev-parse -q --verify "$ref" || true)
+  [ "$old" = "${expect:-$zero}" ] || { echo "git-push-gate: $ref は GitHub 側で更新されています。fetch してからやり直してください" >&2; exit 1; }
   set -- "$@" "--force-with-lease=$ref:$expect" "$spec"
 done
 
