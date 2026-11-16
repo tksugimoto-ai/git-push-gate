@@ -49,6 +49,11 @@ cws="${CONTAINER_WORKSPACE:-$(docker inspect -f '{{range .Mounts}}{{if eq .Sourc
 [ -n "$cws" ] || die "devcontainer 内のワークスペースが分かりません。環境変数 CONTAINER_WORKSPACE で指定してください"
 x() { docker exec -i -u "$user" "$DC" sh -c "$1"; }
 
+# ゲートを迂回して書き込めてしまう設定があれば、設定せずに止める
+x '[ ! -S /var/run/docker.sock ]' || die "devcontainer に docker.sock がマウントされています（ゲートのコンテナの中身を読めてしまう）。外してください"
+x '! ls /tmp/vscode-ssh-auth-*.sock >/dev/null 2>&1 && [ -z "${SSH_AUTH_SOCK:-}" ]' \
+  || die "devcontainer に SSH エージェントが転送されています（ホストの鍵で GitHub に直接 push できてしまう）。止めてください"
+
 # 鍵はホストのファイルを経由せず、ゲートから devcontainer へ直接渡す
 x 'umask 077 && mkdir -p ~/.ssh && cat > ~/.ssh/git-push-gate' <<EOF
 $(docker exec "$GATE" cat /config/client_key)
@@ -71,7 +76,7 @@ if ! grep -qx 'Include ~/.ssh/git-push-gate.conf' ~/.ssh/config 2>/dev/null; the
   { echo 'Include ~/.ssh/git-push-gate.conf'; cat ~/.ssh/config 2>/dev/null || true; } > ~/.ssh/config.new
   mv ~/.ssh/config.new ~/.ssh/config
 fi"
-docker exec -u "$user" "$DC" git -C "$cws" remote set-url --push "$REMOTE" ssh://git-push-gate/repo.git
+docker exec -u "$user" "$DC" git -C "$cws" remote set-url --push "$REMOTE" ssh://git@git-push-gate/repo.git
 
 # 接続の確認: ゲートは push 以外を拒否するので、その拒否メッセージが返れば届いている
 if x 'ssh -T git-push-gate true 2>&1' | grep -q 'git-push-gate:'; then
@@ -81,8 +86,6 @@ else
   die "ゲートに接続できません（上の出力を確認してください）"
 fi
 
-# devcontainer 側の危ない設定の警告（ゲートを迂回して書き込めてしまう）
-x 'ls /tmp/vscode-ssh-auth-*.sock >/dev/null 2>&1 && echo "attach: 警告: SSH エージェントが転送されています" >&2
-   [ -S /var/run/docker.sock ] && echo "attach: 警告: docker.sock がマウントされています" >&2
-   git config --get-all credential.helper 2>/dev/null | grep -q vscode && echo "attach: 警告: VS Code の git credential helper が有効です（dev.containers.gitCredentialHelperConfigLocation を none に）" >&2
+# VS Code の credential helper は、VS Code が接続するたびに設定し直すので、警告にとどめる
+x 'git config --get-all credential.helper 2>/dev/null | grep -q vscode && echo "attach: 警告: VS Code の git credential helper が有効です（dev.containers.gitCredentialHelperConfigLocation を none に）" >&2
    true'

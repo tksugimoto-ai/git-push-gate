@@ -123,6 +123,14 @@ check "attach.sh は 2 回実行しても設定が重複しない" \
   'GATE="$P-gate" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
    [ "$(docker exec -u dev "$P-dev" grep -c git-push-gate.conf /home/dev/.ssh/config)" = 1 ]'
 docker rm -f "$P-dev" >/dev/null
+# SSH エージェントが転送されている devcontainer には、設定せずに止める
+mkdir -p "$T/ws2"
+docker run -d --name "$P-dev" -v "$T/ws2:/workspaces/ws2" -e SSH_AUTH_SOCK=/tmp/agent.sock \
+  --label "devcontainer.local_folder=$T/ws2" --entrypoint sleep "$IMAGE" 1000000 >/dev/null
+check "SSH エージェントが転送されていれば attach.sh は止まる" \
+  '! GATE="$P-gate" sh "$ROOT/client/attach.sh" "$T/ws2" >"$T/out" 2>&1 && grep -q "SSH エージェントが転送" "$T/out" &&
+   ! docker exec "$P-dev" test -e /root/.ssh/git-push-gate'
+docker rm -f "$P-dev" >/dev/null
 
 # --- パスフレーズ付きの鍵 ---
 start_gate github_key_pp -e UNLOCK_LIFETIME=1h

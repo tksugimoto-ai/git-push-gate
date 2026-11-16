@@ -4,6 +4,16 @@
 
 GitHub の Rulesets やブランチ保護が使えない環境（プランの制約、管理者権限がない等）で、devcontainer 内の AI エージェントに feature ブランチの push を任せつつ、保護したいブランチへの書き込みは人間だけに残すことを目的にしています。
 
+## 前提条件（必ず守ること）
+
+ゲートが守れるのは「エージェントの push」だけです。**GitHub Actions のワークフローが、エージェントの書き換えたコードを write 権限やシークレット付きで実行できると、ゲートの保証はすべてなくなります**（例: main と同じ内容の `on: push` + `contents: write` のワークフローを feature ブランチに置き、それが呼ぶスクリプトを `git push origin HEAD:main` に書き換える）。
+
+- write 権限やシークレットを持つワークフローは、保護ブランチへの `push` でだけ動くようにする（`branches: [main]` など）
+- そうしたワークフローを `pull_request` で動かさない（`branches: [main]` で絞っても、main 向けの PR では head 側のコードで動く）
+- `issue_comment` などで PR の head を checkout して実行するワークフローを置かない
+
+ゲートは、エージェントが**変更した**ワークフローを検査しますが、保護ブランチと同じ内容のワークフローが実行するコード（スクリプトや `.github/actions` 以外のローカルアクション）は検査しません。
+
 ## 仕組み
 
 ```
@@ -163,9 +173,9 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
    - クライアント用の鍵（ゲートのコンテナから直接渡す）
    - ゲートのホスト鍵（ゲートから読むので、フィンガープリントの照合は不要）
    - `~/.ssh/config` の `Host git-push-gate`（公開先が `127.0.0.1` なら `host.docker.internal`、それ以外はその IP）
-   - `git remote set-url --push origin ssh://git-push-gate/repo.git`
+   - `git remote set-url --push origin ssh://git@git-push-gate/repo.git`
 
-   最後にゲートへの接続を確かめ、SSH エージェントの転送・docker.sock・VS Code の git credential helper が見つかれば警告します。devcontainer やゲートが自動で見つからないときは、環境変数 `DEVCONTAINER`・`GATE` などで指定します（スクリプトの先頭を参照）。Windows では WSL のシェルから実行してください。
+   docker.sock や SSH エージェントの転送が見つかれば、設定せずに止めます。最後にゲートへの接続を確かめ、VS Code の git credential helper が有効なら警告します。devcontainer やゲートが自動で見つからないときは、環境変数 `DEVCONTAINER`・`GATE` などで指定します（スクリプトの先頭を参照）。Windows では WSL のシェルから実行してください。
 
 ゲートのホスト鍵は `/srv/git` のボリュームに保存されるので、コンテナを作り直しても変わりません。
 
@@ -189,6 +199,12 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 - 保護していないブランチは、人間が作ったものでもエージェントが強制 push・削除できます（意図した仕様です）。
 - main にある既存のワークフローで、`issue_comment` や `pull_request_review` などで動いて PR の head を checkout するものは、エージェントが PR を作れるので危険です（head 側のコードが base 側の権限で動く）。
 - ソースコードの外部送信は防げません。
+
+## 今後の課題
+
+- 変更されていないワークフローも検査し、feature ブランチや `pull_request` で動く特権付きのワークフローがあれば拒否する（上記「前提条件」を仕組みで強制する）
+- ワークフローの検査を、GitHub 用の鍵を読めない別のユーザーで動かす（依存ライブラリが乗っ取られた場合の被害を抑える）
+- 依存ライブラリ（`yaml`）をリポジトリに取り込み、npm のレジストリに依存しない
 
 ## テスト
 
