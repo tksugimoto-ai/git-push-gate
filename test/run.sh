@@ -94,6 +94,8 @@ wf w6 "$(echo "$OK" | sed 's/^on: .*/on: pull_request_target/')"; expect ng "pul
 wf w7 "$OK
 permissions: write-all";                                           expect ng "重複キー" origin w7
 wf w8 "$(echo "$OK" | sed 's/^permissions:/x: \&p write-all\npermissions:/')"; expect ng "アンカー" origin w8
+git switch -qC w9 origin/main; printf 'on: pull_request_target\npermissions: write-all\njobs: {}\n' > ".github/workflows/$(printf '\303\251').yml"
+git add -A; git commit -qm w9;                                     expect ng "ASCII 以外を含むファイル名" origin w9
 git switch -qC act origin/main; echo y >> .github/actions/a/action.yml; git commit -qam act
 expect ng ".github/actions の変更" origin act
 git switch -qC co origin/main; echo "* @me" > .github/CODEOWNERS; git add -A; git commit -qm co

@@ -40,7 +40,10 @@ host="${GATE_HOST:-$host}"
 
 # --- devcontainer ---
 DC="${DEVCONTAINER:-$(one "$(docker ps -q --filter "label=devcontainer.local_folder=$WS")" "devcontainer（$WS）" DEVCONTAINER)}"
-user=$(docker inspect -f '{{index .Config.Labels "devcontainer.metadata"}}' "$DC" | grep -o '"remoteUser": *"[^"]*"' | tail -n1 | sed 's/.*"\([^"]*\)"$/\1/')
+# VS Code が接続するユーザー: remoteUser → containerUser → イメージの USER → root の順
+meta() { docker inspect -f '{{index .Config.Labels "devcontainer.metadata"}}' "$DC" | grep -o "\"$1\": *\"[^\"]*\"" | tail -n1 | sed 's/.*"\([^"]*\)"$/\1/'; }
+user=$(meta remoteUser); [ -n "$user" ] || user=$(meta containerUser)
+[ -n "$user" ] || user=$(docker inspect -f '{{.Config.User}}' "$DC")
 user="${user:-root}"
 cws="${CONTAINER_WORKSPACE:-$(docker inspect -f '{{range .Mounts}}{{if eq .Source "'"$WS"'"}}{{println .Destination}}{{end}}{{end}}' "$DC" | head -n1)}"
 [ -n "$cws" ] || die "devcontainer 内のワークスペースが分かりません。環境変数 CONTAINER_WORKSPACE で指定してください"
@@ -68,7 +71,7 @@ if ! grep -qx 'Include ~/.ssh/git-push-gate.conf' ~/.ssh/config 2>/dev/null; the
   { echo 'Include ~/.ssh/git-push-gate.conf'; cat ~/.ssh/config 2>/dev/null || true; } > ~/.ssh/config.new
   mv ~/.ssh/config.new ~/.ssh/config
 fi"
-x "git -C '$cws' remote set-url --push '$REMOTE' ssh://git-push-gate/repo.git"
+docker exec -u "$user" "$DC" git -C "$cws" remote set-url --push "$REMOTE" ssh://git-push-gate/repo.git
 
 # 接続の確認: ゲートは push 以外を拒否するので、その拒否メッセージが返れば届いている
 if x 'ssh -T git-push-gate true 2>&1' | grep -q 'git-push-gate:'; then

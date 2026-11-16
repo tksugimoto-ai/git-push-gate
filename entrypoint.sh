@@ -2,6 +2,9 @@
 set -eu
 : "${UPSTREAM:?例: git@github.com:owner/repo.git}"
 PROTECTED="${PROTECTED_BRANCHES:-main develop}"
+case "$PROTECTED" in
+  *[*?[]*) echo "entrypoint: PROTECTED_BRANCHES にパターンは使えません（ブランチ名を完全一致で列挙）: $PROTECTED" >&2; exit 1 ;;
+esac
 CONFIG=/config          # github_key, client_keys.pub, known_hosts を置いたディレクトリ（読み取り専用でマウント）
 REPO=/srv/git/repo.git
 # root で git ユーザー所有のリポジトリを操作するため safe.directory を指定
@@ -37,6 +40,10 @@ else
 fi
 
 # クライアント（devcontainer）の公開鍵を、強制コマンド付きで登録
+# オプション（from= など）付きの行は、前に足すオプションと合わさって無効な鍵になるので拒否する
+if grep -Ev '^[[:space:]]*(#|$)' "$CONFIG/client_keys.pub" | grep -Evq '^(ssh-|ecdsa-|sk-)'; then
+  echo "entrypoint: $CONFIG/client_keys.pub には、オプションなしの公開鍵だけを書いてください" >&2; exit 1
+fi
 grep -Ev '^[[:space:]]*(#|$)' "$CONFIG/client_keys.pub" \
   | sed 's|^|command="/usr/local/bin/git-push-gate",restrict |' > /home/git/.ssh/authorized_keys
 chown git:git /home/git/.ssh/authorized_keys && chmod 600 /home/git/.ssh/authorized_keys

@@ -13,12 +13,13 @@ const RUNNER_OK = /^(ubuntu|windows|macos)-[\w.-]+$/;                     // Git
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8', maxBuffer: 1 << 26 });
 const tryGit = (...args) => { try { return git(...args).trim(); } catch { return null; } };
 
-const files = git('ls-tree', '-r', '--name-only', commit, '--', DIR).split('\n').filter(Boolean);
+// -z でないと、ASCII 以外を含むパスが引用符付きで出力され、後の比較で一致してしまう
+const entries = git('ls-tree', '-r', '-z', commit, '--', DIR).split('\0').filter(Boolean)
+  .map((line) => { const [meta, path] = line.split('\t'); return { blob: meta.split(' ')[2], path }; });
 const errors = [];
 
-for (const path of files) {
-  const blob = tryGit('rev-parse', `${commit}:${path}`);
-  if (BASES.some((b) => tryGit('rev-parse', `${b}:${path}`) === blob)) continue; // 未変更
+for (const { blob, path } of entries) {
+  if (BASES.some((b) => tryGit('rev-parse', '--verify', '-q', `${b}:${path}`) === blob)) continue; // 未変更
   const fail = (msg) => errors.push(`${path}: ${msg}`);
 
   if (!/\.ya?ml$/.test(path)) { fail('ワークフロー以外のファイルは置けません'); continue; }

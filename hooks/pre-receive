@@ -1,7 +1,7 @@
 #!/bin/sh
 # 受け取った更新を検査し、通ったものだけを GitHub に同期 push する。
 # GitHub 側で失敗したらこのフックも失敗するので、クライアントの push もエラーになる。
-set -eu
+set -euf   # -f: 保護ブランチ名をグロブ展開しない
 zero=0000000000000000000000000000000000000000
 CHECK="${GIT_PUSH_GATE_CHECK:-/usr/local/share/git-push-gate/check-workflows.mjs}"
 # 保護ブランチは entrypoint がリポジトリの設定に書き込む（sshd 経由では環境変数が届かないため）

@@ -43,13 +43,9 @@ run 'ssh-keygen -q -t ed25519 -N "" -C gate -f /w/github_key_plain
 docker run -d --name "$P-github" --network "$NET" --network-alias github.com \
   -v "$T/github:/github:ro" --entrypoint sh "$IMAGE" /github/start.sh >/dev/null
 
-wait_ssh() { # wait_ssh ホスト名 → known_hosts の行を出力
-  i=0
-  until run "ssh-keyscan -t ed25519 $1 2>/dev/null | grep -q ." 2>/dev/null; do
-    i=$((i+1)); [ "$i" -lt 30 ] || { echo "$1 の sshd が起動しません" >&2; docker logs "$2" >&2; exit 1; }
-    sleep 1
-  done
-  run "ssh-keyscan -t ed25519 $1 2>/dev/null"
+wait_ssh() { # wait_ssh ホスト名 コンテナ → known_hosts の行を出力
+  run "for i in \$(seq 30); do ssh-keyscan -t ed25519 $1 2>/dev/null | grep . && exit 0; sleep 1; done; exit 1" \
+    || { echo "$1 の sshd が起動しません" >&2; docker logs "$2" >&2; exit 1; }
 }
 wait_ssh github.com "$P-github" > "$T/config/known_hosts"
 

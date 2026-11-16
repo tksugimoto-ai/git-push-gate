@@ -23,7 +23,7 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 |---|---|
 | 保護ブランチ（既定 `main develop`）の更新・削除 | 本来の目的 |
 | ブランチ以外の ref（タグなど） | |
-| `.github/actions` の変更 | 既存のワークフローがシークレットや write 権限付きで呼んでいる可能性があり、単体では安全か判定できない |
+| `.github/actions` の変更 | 既存のワークフローがシークレットや write 権限付きで呼んでいる可能性があり、単体では安全か判定できない（守れるのはこのディレクトリだけ。下記「限界」を参照） |
 | ポリシーに合わない `.github/workflows` の変更 | 下記 |
 
 ### ワークフローのポリシー
@@ -66,7 +66,7 @@ ssh-keygen -t ed25519 -C git-push-gate -f github_key
 ssh-keyscan -t ed25519 github.com > known_hosts
 ssh-keygen -lf known_hosts
 
-# devcontainer 側の公開鍵（複数行可）
+# devcontainer 側の公開鍵（複数行可。from= などのオプションは付けない）
 cp /path/to/devcontainer_key.pub client_keys.pub
 ```
 
@@ -97,7 +97,7 @@ docker compose exec git-push-gate unlock
 | 環境変数 | 説明 |
 |---|---|
 | `UPSTREAM` | 必須。例: `git@github.com:owner/repo.git` |
-| `PROTECTED_BRANCHES` | 保護するブランチ（空白区切り）。既定 `main develop` |
+| `PROTECTED_BRANCHES` | 保護するブランチ（空白区切り、完全一致。`release/*` のようなパターンは使えない）。既定 `main develop` |
 | `UNLOCK_LIFETIME` | パスフレーズ付きの鍵を解除しておく時間（例: `8h`）。既定は無期限 |
 
 | マウント先 | 内容 |
@@ -171,7 +171,7 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 ## 限界
 
 - クライアント側のガードではなくサーバー側の強制ですが、GitHub のブランチ保護の代わりにはなりません。使えるならそちらが確実です。
-- ワークフローが実行するコード（`npm test` から呼ばれるスクリプト等）はエージェントが変更できます。write 権限やシークレットを持つ既存ワークフローは、保護ブランチへの push でだけ動くようにしてください。
+- ワークフローが実行するコード（`npm test` から呼ばれるスクリプト、`.github/actions` 以外に置いたローカルアクション（`uses: ./tools/x` など）等）はエージェントが変更できます。write 権限やシークレットを持つ既存ワークフローは、保護ブランチへの push でだけ動くようにしてください。`pull_request` は base ブランチで絞り込むので、`branches: [main]` でも main 向けの PR では head 側のコードで動く点に注意してください。
 - ソースコードの外部送信は防げません。
 
 ## テスト
