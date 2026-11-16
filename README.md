@@ -39,6 +39,15 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 
 ワークフローを経由した書き込み（Actions の `GITHUB_TOKEN` で main に push する等）やシークレットの持ち出しを防ぐためです。拒否されたコミットはエージェントの手元に残るので、必要なら人間が push してください。
 
+#### write 権限を検査する理由
+
+同じリポジトリのブランチから動くワークフローは、`permissions:` に書けば write 権限を得られます（得られないのは fork からの場合だけです）。組織のオーナーが禁止していれば得られませんが、外からは確認できないので、それを前提にはしていません。トップレベルの `permissions` を必須にしているのは、`permissions` を書くと書かなかった権限が none になり、既定の権限設定に左右されなくなるためです。
+
+#### `pull_request_target` / `workflow_run` を禁止する理由
+
+- `pull_request_target` は、PR の head ではなく **base ブランチ**のワークフローが、write 権限とシークレット付きで動きます。エージェントは PR 用のトークンで、自分の push したブランチを base にした PR を作れるので、エージェントが書いたワークフローが write 権限付きで動いてしまいます。このため禁止は必須です。
+- `workflow_run` はデフォルトブランチにあるものしか動かないので、本来は保護ブランチのワークフローしか動きませんが、念のため禁止しています。
+
 ## 使い方
 
 ### 1. 鍵とホスト鍵を用意する
@@ -133,10 +142,6 @@ npm test
 docker build -t git-push-gate:test .
 sh test/e2e.sh
 ```
-
-## イメージの公開
-
-main への push と `v*` タグで、`ghcr.io/tksugimoto/git-push-gate` に linux/amd64・linux/arm64 のイメージを公開します（[.github/workflows/publish.yml](.github/workflows/publish.yml)）。このワークフローは `packages: write` を持つので、ゲート経由では push できません（人間が push します）。
 
 ## ライセンス
 
