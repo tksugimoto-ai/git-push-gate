@@ -55,7 +55,7 @@ wait_ssh github.com "$P-github" > "$T/config/known_hosts"
 start_gate() { # start_gate 鍵ファイル名 [追加の docker run 引数...]
   key=$1; shift
   docker rm -f "$P-gate" >/dev/null 2>&1 || true
-  cp "$T/$key" "$T/config/github_key"; cp "$T/$key.pub" "$T/config/github_key.pub"
+  run "cp /w/$key /w/config/github_key && cp /w/$key.pub /w/config/github_key.pub"
   docker run -d --name "$P-gate" --network "$NET" --network-alias gate \
     -e UPSTREAM=git@github.com:repo.git -v "$T/config:/config:ro" -v "$P-data:/srv/git" \
     "$@" "$IMAGE" >/dev/null
