@@ -105,6 +105,22 @@ wait_ssh gate "$P-gate" >/dev/null
 if client 'git switch -qc feat2 && echo c > c && git add c && git commit -qm c && git push -q origin feat2' && gh_has feat2
 then ok "再起動後も push できる"; else ng "再起動後も push できる"; fi
 
+# compose を使わない devcontainer（既定の bridge で名前解決なし）から、ホストに公開したポート経由で push
+cp "$T/client/known_hosts_gate" "$T/known_hosts_gate_before"
+GW=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
+start_gate github_key_plain -p "$GW::22"
+if cmp -s "$T/client/known_hosts_gate" "$T/known_hosts_gate_before"
+then ok "コンテナを作り直してもホスト鍵が変わらない"; else rm -f "$T/out"; ng "コンテナを作り直してもホスト鍵が変わらない"; fi
+PORT=$(docker port "$P-gate" 22/tcp | sed 's/.*://' | head -n1)
+if docker run --rm -v "$T:/w" --entrypoint sh "$IMAGE" -c "set -e
+    h=\$(ip route | awk '/default/{print \$3}')
+    mkdir -p ~/.ssh && cp /w/client/id_ed25519 ~/.ssh/ && chmod 600 ~/.ssh/id_ed25519
+    sed \"s/^gate /[\$h]:$PORT /\" /w/client/known_hosts_gate > ~/.ssh/known_hosts
+    git init -q -b bridge /tmp/d && cd /tmp/d && echo x > x && git add x
+    git -c user.name=t -c user.email=t@example.com commit -qm x
+    git push -q ssh://git@\$h:$PORT/repo.git bridge" >"$T/out" 2>&1 && gh_has bridge
+then ok "既定の bridge からゲートウェイ経由で push できる"; else ng "既定の bridge からゲートウェイ経由で push できる"; fi
+
 # --- パスフレーズ付きの鍵 ---
 start_gate github_key_pp -e UNLOCK_LIFETIME=1h
 

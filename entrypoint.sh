@@ -55,5 +55,8 @@ chown -R git:git "$REPO"
 chown root:root "$REPO/hooks" "$REPO/hooks/pre-receive" "$REPO/config"
 chmod 644 "$REPO/config"
 
-ssh-keygen -A >/dev/null
-exec /usr/sbin/sshd -D -e
+# ホスト鍵はボリュームに置き、コンテナを作り直しても変わらないようにする（クライアントの known_hosts が合うように）
+HOSTKEYS=/srv/git/ssh_host_keys
+install -d -o root -g root -m 700 "$HOSTKEYS"
+[ -s "$HOSTKEYS/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -C git-push-gate -f "$HOSTKEYS/ssh_host_ed25519_key"
+exec /usr/sbin/sshd -D -e -h "$HOSTKEYS/ssh_host_ed25519_key"
