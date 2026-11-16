@@ -5,7 +5,11 @@ set -euf   # -f: 保護ブランチ名をグロブ展開しない
 zero=0000000000000000000000000000000000000000
 CHECK="${GIT_PUSH_GATE_CHECK:-/usr/local/share/git-push-gate/check-workflows.mjs}"   # 環境変数はテスト用
 # 保護ブランチは entrypoint がリポジトリの設定に書き込む（sshd 経由では環境変数が届かないため）
-PROTECTED=$(git config --get gate.protected) || { echo "git-push-gate: gate.protected が設定されていません" >&2; exit 1; }
+PROTECTED=$(git config --get gate.protected) || PROTECTED=""
+# shellcheck disable=SC2086
+set -- $PROTECTED
+[ $# -gt 0 ] || { echo "git-push-gate: gate.protected が設定されていないか、空です" >&2; exit 1; }
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 # 名前を間違えた保護ブランチは何も守らないので、GitHub にない保護ブランチがあれば受け付けない（直前に fetch 済み）
 for b in $PROTECTED; do
   git rev-parse -q --verify "refs/heads/$b" >/dev/null || {
@@ -20,8 +24,14 @@ while read -r old new ref; do
   esac
   # 空白などを含む不正な名前は、後で $checks を分割するときにずれるので先に拒否
   git check-ref-format "$ref" || { echo "git-push-gate: $ref は不正なブランチ名です" >&2; exit 1; }
+  name=${ref#refs/heads/}
+  # 人間やツールが取り違える名前（HEAD、refs/tags/v1 のようにタグや別の ref に見えるもの）は作らせない
+  case "$name" in
+    HEAD|refs/*) echo "git-push-gate: $ref は紛らわしい名前のため拒否" >&2; exit 1 ;;
+  esac
+  # 保護ブランチ（大文字・小文字だけが違う Main なども含む）
   for b in $PROTECTED; do
-    if [ "$ref" = "refs/heads/$b" ]; then
+    if [ "$(lower "$name")" = "$(lower "$b")" ]; then
       echo "git-push-gate: $ref への push は禁止" >&2; exit 1
     fi
   done

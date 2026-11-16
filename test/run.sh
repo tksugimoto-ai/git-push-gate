@@ -124,6 +124,17 @@ git --git-dir="$T/gate.git" config gate.protected "main develop nosuch"
 git switch -qC typo origin/main; echo t > t; git add t; git commit -qm typo
 expect ng "GitHub にない保護ブランチ" origin typo
 git --git-dir="$T/gate.git" config gate.protected "main develop"
+wf w19 "$(echo "$OK" | sed 's/ubuntu-latest/ubuntu-my-selfhosted/')"; expect ng "ubuntu- で始まる独自ラベル" origin w19
+wf w20 "$(echo "$OK" | sed 's/ubuntu-latest/macos-15-xlarge/')";     expect ok "GitHub ホストのラベル（macos-15-xlarge）" origin w20
+# 紛らわしいブランチ名
+git switch -qC odd origin/main; echo o > o; git add o; git commit -qm odd
+expect ng "HEAD という名前のブランチ" origin odd:refs/heads/HEAD
+expect ng "大文字だけが違う保護ブランチ（Main）" origin odd:refs/heads/Main
+expect ng "refs/ で始まるブランチ名" origin odd:refs/heads/refs/tags/v1
+# 保護ブランチの一覧が空白だけ
+git --git-dir="$T/gate.git" config gate.protected " "
+expect ng "保護ブランチの一覧が空のときの削除" origin :develop
+git --git-dir="$T/gate.git" config gate.protected "main develop"
 git switch -qC act origin/main; echo y >> .github/actions/a/action.yml; git commit -qam act
 expect ng ".github/actions の変更" origin act
 git switch -qC co origin/main; echo "* @me" > .github/CODEOWNERS; git add -A; git commit -qm co

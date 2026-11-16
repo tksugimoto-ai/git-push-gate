@@ -6,6 +6,9 @@ PROTECTED="${PROTECTED_BRANCHES:-main develop}"   # 既定値はここだけ（�
 case "$PROTECTED" in
   *[*?[]*) die "PROTECTED_BRANCHES にパターンは使えません（ブランチ名を完全一致で列挙）: $PROTECTED" ;;
 esac
+# 空白だけなどで 0 件になると何も守らないので拒否。区切りは空白 1 つにそろえる（パターンは上で拒否済み）
+# shellcheck disable=SC2086
+set -- $PROTECTED; [ $# -gt 0 ] || die "PROTECTED_BRANCHES が空です"; PROTECTED="$*"; set --
 CONFIG=/config          # github_key, client_keys.pub, known_hosts を置いたディレクトリ（読み取り専用でマウント）
 REPO=/srv/git/repo.git  # root で操作できるよう、Dockerfile で safe.directory に登録してある
 g() { git --git-dir="$REPO" "$@"; }

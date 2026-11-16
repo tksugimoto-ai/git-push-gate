@@ -14,7 +14,9 @@ const TRIGGERS = new Set(['push', 'pull_request', 'pull_request_review', 'pull_r
 const TOP_KEYS = new Set(['name', 'run-name', 'on', 'permissions', 'env', 'defaults', 'concurrency', 'jobs']);
 const JOB_KEYS = new Set(['name', 'needs', 'if', 'runs-on', 'permissions', 'concurrency', 'outputs', 'env',
   'defaults', 'steps', 'timeout-minutes', 'strategy', 'continue-on-error', 'container', 'services', 'uses', 'with']);
-const RUNNER_OK = /^(ubuntu|windows|macos)-[\w.-]+$/;   // GitHub ホストのランナーのみ
+// GitHub ホストのランナーの標準ラベルの形だけ（ubuntu-24.04、windows-2025、macos-15-xlarge など）。
+// 先頭だけで判定すると ubuntu-my-runner のようなセルフホストのランナーのラベルも通ってしまう
+const RUNNER_OK = /^(ubuntu-(latest|\d{2}\.\d{2})(-arm)?|windows-(latest|\d{4}|11-arm)|macos-(latest|\d{2})(-intel|-large|-xlarge)?)$/;
 const LOCAL_WORKFLOW = /^\.\/\.github\/workflows\/[^/]+\.ya?ml$/;   // 同じコミット内の再利用可能なワークフロー（それ自体も検査される）
 
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'inherit'] });
