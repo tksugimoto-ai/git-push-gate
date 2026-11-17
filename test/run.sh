@@ -223,6 +223,17 @@ expect ng "許可されていない接頭辞のブランチ" origin pfx
 expect ok "許可された接頭辞のブランチ" origin pfx:refs/heads/agent/pfx
 expect ng "許可されていない接頭辞のブランチの削除" origin :stale
 git --git-dir="$T/gate.git" config --unset gate.allowedPrefixes
+# UTF-8 の C1 制御文字（U+009B は CSI）や、表示の向きを変える文字（U+202E）を含む名前は、記録に書かずに拒否
+git switch -qC u8 origin/main; echo u > u; git add u; git commit -qm u8
+expect ng "C1 制御文字を含む名前" origin "u8:refs/heads/ok$(printf '\302\233')2J"
+expect ng "表示の向きを変える文字を含む名前" origin "u8:refs/heads/x$(printf '\342\200\256')/niaM"
+if LC_ALL=C grep -q "$(printf '\302\233')\|$(printf '\342\200\256')" "$T/gate.git/push-gate.log"
+then fail=$((fail+1)); echo "FAIL ASCII 以外の文字を記録に書かない"; else pass=$((pass+1)); echo "ok   ASCII 以外の文字を記録に書かない"; fi
+# GitHub にある同じ名前のタグ（軽量タグと注釈付きタグ）
+( cd "$T/seed" && git tag v9 origin/main && git tag -a -m t v8 origin/main && git push -q origin v9 v8 )
+expect ng "軽量タグと同じ名前のブランチ" origin u8:v9
+expect ng "注釈付きタグと同じ名前のブランチ" origin u8:refs/heads/v8
+expect ok "タグと違う名前のブランチ" origin u8:refs/heads/v7
 
 # パスフレーズ付きの鍵が未解除のとき
 if command -v ssh-agent >/dev/null; then

@@ -7,8 +7,11 @@ if [ -n "${SSH_CONNECTION:-}" ]; then REPO=/srv/git/repo.git; else REPO="${GIT_P
 
 case "${SSH_ORIGINAL_COMMAND:-}" in
   "git-receive-pack '/repo.git'"|"git-receive-pack 'repo.git'") ;;
-  *) # 記録にはコマンドの中身を書かない（制御文字などを書き込ませない）
-     printf '%s REJECTED 許可されていないコマンド（push 以外）\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$REPO/push-gate.log" 2>/dev/null || true
+  *) # 記録にはコマンドの中身を書かない（制御文字などを書き込ませない）。ロックの前なので何度でも呼べる。
+     # 記録でボリュームを埋められないよう、10MB を超えたら書かない
+     if [ "$(wc -c < "$REPO/push-gate.log" 2>/dev/null || echo 0)" -lt 10485760 ]; then
+       printf '%s REJECTED 許可されていないコマンド（push 以外）\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$REPO/push-gate.log" 2>/dev/null || true
+     fi
      echo "git-push-gate: このコマンドは許可されていません（push のみ）" >&2; exit 1 ;;
 esac
 
@@ -27,8 +30,9 @@ flock -w 300 9 || { echo "git-push-gate: ほかの push が終わらないため
 # これでクライアント側の fast-forward 判定と、pre-receive の lease が GitHub と一致する。
 # 整理（gc）。fetch や receive-pack の中では止めていて、フックの中では一時領域しか見ないので、ここで行う
 git -c gc.autoDetach=false --git-dir="$REPO" gc --auto --quiet || echo "git-push-gate: 警告: gc に失敗しました" >&2
-# 一度も fetch できていなければ（起動時の fetch の失敗など）、全履歴を取るので時間制限を長くする
-if [ -n "$(git --git-dir="$REPO" for-each-ref --count=1 refs/heads/)" ]; then limit=120; else limit=1800; fi
+# 一度も fetch できていなければ（起動時の fetch の失敗など）、全履歴を取るので時間制限を長くする。
+# 時間切れの fetch は途中から再開しないので、人間が大きな push をした後でも足りるよう、余裕を持たせる
+if [ -n "$(git --git-dir="$REPO" for-each-ref --count=1 refs/heads/)" ]; then limit=600; else limit=1800; fi
 # 裏で起動する gc や保守処理は、ロックのファイル記述子（fd 9）を引き継いで次の push を待たせるので止める
 timeout "$limit" git -c gc.auto=0 -c maintenance.auto=false --git-dir="$REPO" fetch --prune --no-tags --quiet upstream '+refs/heads/*:refs/heads/*'
 

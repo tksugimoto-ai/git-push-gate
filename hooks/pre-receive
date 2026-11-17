@@ -12,7 +12,8 @@ die() {
 tip() { git show-ref --verify --hash "$1" 2>/dev/null || true; }
 # 保護ブランチなどは entrypoint がリポジトリの設定に書き込む（sshd 経由では環境変数が届かないため）
 PROTECTED=$(git config --get gate.protected) || PROTECTED=""
-PREFIXES=$(git config --get gate.allowedPrefixes) || PREFIXES=""
+# 設定がない（終了コード 1）ときだけ制限なし。読めないときは拒否する（制限なしと取り違えない）
+PREFIXES=$(git config --get gate.allowedPrefixes) || { [ $? -eq 1 ] || die "gate.allowedPrefixes を読めません"; PREFIXES=""; }
 # shellcheck disable=SC2086
 set -- $PROTECTED
 [ $# -gt 0 ] || die "gate.protected が設定されていないか、空です"
@@ -26,9 +27,10 @@ for b in $PROTECTED; do
   [ -n "$(tip "refs/heads/$b")" ] || die "保護ブランチ $b が GitHub にありません。PROTECTED_BRANCHES を確認してください"
 done
 # GitHub の今の状態を、判定の直前にもう一度確かめる。push を始めてからデータを送り終えるまで（最大 10 分）の間に
-# 人間が保護ブランチのワークフローを直していたら、受け付けの前の fetch の値で判定することになるため
+# 人間が保護ブランチのワークフローを直していたら、受け付けの前の fetch の値で判定することになるため。
+# タグも取る（ゲートはタグを fetch しないので、同じ名前のブランチを作らせないために使う）
 # shellcheck disable=SC2046
-remote=$(timeout 60 git ls-remote --symref upstream HEAD $(for b in $PROTECTED; do printf 'refs/heads/%s ' "$b"; done)) \
+remote=$(timeout 60 git ls-remote --symref upstream HEAD 'refs/tags/*' $(for b in $PROTECTED; do printf 'refs/heads/%s ' "$b"; done)) \
   || die "GitHub の状態を確かめられません"
 for b in $PROTECTED; do
   [ "$(printf '%s\n' "$remote" | awk -v r="refs/heads/$b" '$1 != "ref:" && $2 == r { print $1 }')" = "$(tip "refs/heads/$b")" ] \
@@ -76,19 +78,23 @@ check_commit() { # check_commit ref new
   [ "$(git cat-file -t "$2" 2>/dev/null || true)" = commit ] || die "$1: コミット以外は push できません"
   tree_ok "$2" || die "$1: .github か .github/workflows がディレクトリではありません"
   case_ok "$2" || die "$1: 大文字・小文字だけが違う .github / workflows / actions は使えません"
-  files=$(workflows "$2"); actions=$(entry "$2" .github/actions)
+  files=$(workflows "$2") || exit 1; actions=$(entry "$2" .github/actions) || exit 1
   for b in $PROTECTED; do
     c=$(tip "refs/heads/$b"); tree_ok "$c" || continue
-    [ "$actions" = "$(entry "$c" .github/actions)" ] || continue
-    if subset "$files" "$(workflows "$c")"; then return 0; fi
+    # [ ] や if の中のコマンド置換では、読めないときの die がサブシェルを抜けるだけで空と比べてしまうので、先に変数に入れる
+    ca=$(entry "$c" .github/actions) || exit 1
+    [ "$actions" = "$ca" ] || continue
+    cf=$(workflows "$c") || exit 1
+    if subset "$files" "$cf"; then return 0; fi
   done
   die "$1: .github/workflows か .github/actions が、どの保護ブランチとも一致しないため拒否。main に rebase するか、人間が push してください"
 }
 
 set --; log=""
 while IFS= read -r line; do
-  # 制御文字（端末の制御シーケンスなど）を含む行は、記録やメッセージに名前を出さずに拒否する
-  if printf '%s' "$line" | LC_ALL=C grep -q '[[:cntrl:]]'; then die "不正な更新の指定です（制御文字を含む）"; fi
+  # 印字できる ASCII 以外を含む行は、記録やメッセージに名前を出さずに拒否する。制御文字（端末の制御シーケンス）のほか、
+  # UTF-8 の C1 制御文字（U+009B は CSI として働く）や、表示の向きを変える文字（U+202E など。…/Main に見せかける）も含む
+  if printf '%s' "$line" | LC_ALL=C grep -q '[^ -~]'; then die "不正な更新の指定です（制御文字か、ASCII 以外の文字を含む）"; fi
   # 行をそのまま読み、「old new ref」の形でなければ拒否する（read で区切ると、末尾の空白などが取り除かれ、
   # receive-pack が後で拒否する名前を、整えた名前で GitHub に push してしまう）
   old=${line%% *}; rest=${line#* }; new=${rest%% *}; ref=${rest#* }
@@ -112,6 +118,11 @@ while IFS= read -r line; do
   for b in $PROTECTED; do
     [ "$(lower "$name")" != "$(lower "$b")" ] || die "$ref への push は禁止"
   done
+  # GitHub にある同じ名前のタグ（v1.2.3 など）。短い名前で引くツール（git clone --branch、uses: owner/repo@v1 など）が
+  # ブランチの方を取ることがある
+  if printf '%s\n' "$remote" | awk -v r="refs/tags/$name" '$1 != "ref:" && ($2 == r || $2 == r "^{}") { f=1 } END { exit !f }'; then
+    die "$ref は GitHub にある同じ名前のタグと紛らわしいため拒否"
+  fi
   # 許可する接頭辞（ALLOWED_BRANCH_PREFIXES）が設定されていれば、それ以外のブランチは作成・更新・削除させない
   if [ -n "$PREFIXES" ]; then
     okp=no
