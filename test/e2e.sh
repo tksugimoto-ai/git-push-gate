@@ -78,8 +78,10 @@ client() {
 gh_has() { docker exec "$P-github" git --git-dir=/home/git/repo.git rev-parse -q --verify "refs/heads/$1" >/dev/null; }
 commit() { echo "echo $1 > $1 && git add $1 && git commit -qm $1"; }
 
+gate_has() { docker exec "$P-gate" git --git-dir=/srv/git/repo.git rev-parse -q --verify "refs/heads/$1" >/dev/null; }
 # --- パスフレーズなしの鍵 ---
 start_gate github_key_plain
+check "起動時に GitHub を fetch している" 'gate_has develop'
 
 check "feature ブランチの push が GitHub に届く" \
   'client "git switch -qc feat && $(commit a) && git push -q origin feat" && gh_has feat'
@@ -134,6 +136,9 @@ docker rm -f "$P-dev" >/dev/null
 
 # --- パスフレーズ付きの鍵 ---
 start_gate github_key_pp -e UNLOCK_LIFETIME=1h
+# ゲートの起動後に「GitHub」だけにブランチを作る（unlock の後の fetch で入るはず）
+docker exec "$P-github" git --git-dir=/home/git/repo.git branch fromgh main
+check "unlock の前はまだ fetch していない" '! gate_has fromgh'
 
 check "unlock 前の push は「ロックされています」で拒否" \
   '! client "git switch -qc feat3 && $(commit d) && git push -q origin feat3" && grep -q ロックされています "$T/out" && ! gh_has feat3'
@@ -141,10 +146,12 @@ check "unlock 前の push は「ロックされています」で拒否" \
 docker exec "$P-gate" sh -c 'printf "#!/bin/sh\necho secret\n" > /tmp/askpass && chmod 755 /tmp/askpass'
 check "unlock" \
   'docker exec -e SSH_ASKPASS=/tmp/askpass -e SSH_ASKPASS_REQUIRE=force "$P-gate" unlock >"$T/out" 2>&1'
+check "unlock の後に GitHub を fetch している" 'gate_has fromgh'
 check "unlock 後の push が GitHub に届く" \
   'client "git switch -qc feat3 && $(commit d) && git push -q origin feat3" && gh_has feat3'
 check "unlock 後も develop への push は拒否" \
   '! client "$(commit e) && git push -q origin HEAD:develop" && grep -q git-push-gate: "$T/out"'
+check "push した更新が記録されている" 'docker exec "$P-gate" grep -q " refs/heads/feat3 " /srv/git/repo.git/push-gate.log'
 check "鍵がエージェントに読み込まれている" \
   'docker exec "$P-gate" su -s /bin/sh git -c "SSH_AUTH_SOCK=/run/git-push-gate/agent.sock ssh-add -l" | grep -q gate-pp'
 

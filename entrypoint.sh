@@ -67,6 +67,10 @@ g config receive.fsckObjects true
 # bare リポジトリの HEAD が指すブランチ（master など）の削除を receive-pack が拒否すると、
 # GitHub では削除済みなのにクライアントには失敗と返るので、拒否させない（保護は pre-receive が行う）
 g config receive.denyDeleteCurrent ignore
+# receive-pack が裏で起動する gc は、ロックのファイル記述子を引き継いで次の push を待たせるので止める
+g config receive.autogc false
+# 受け付ける大きさの上限（ボリュームを埋められないように）
+g config receive.maxInputSize "${MAX_PUSH_SIZE:-500m}"
 install -o root -g root -m 755 /usr/local/share/git-push-gate/pre-receive "$REPO/hooks/pre-receive"
 chown -R git:git "$REPO"
 chown root:root "$REPO/hooks" "$REPO/hooks/pre-receive" "$REPO/config"
@@ -76,4 +80,11 @@ chmod 644 "$REPO/config"
 HOSTKEYS=/srv/git/ssh_host_keys
 install -d -o root -g root -m 700 "$HOSTKEYS"
 [ -s "$HOSTKEYS/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -C git-push-gate -f "$HOSTKEYS/ssh_host_ed25519_key"
+
+# 最初の fetch（全履歴）は時間がかかるので、push の前に時間制限なしで済ませておく。
+# UPSTREAM・鍵・known_hosts の間違いもここで分かる。パスフレーズ付きの鍵は unlock の後に行う
+if [ -z "$agent_sock" ]; then
+  su -s /bin/sh git -c "git --git-dir=$REPO fetch --prune --quiet upstream '+refs/heads/*:refs/heads/*'" \
+    || echo "entrypoint: 警告: GitHub から fetch できません（UPSTREAM・鍵・known_hosts を確認してください）" >&2
+fi
 exec /usr/sbin/sshd -D -e -h "$HOSTKEYS/ssh_host_ed25519_key"

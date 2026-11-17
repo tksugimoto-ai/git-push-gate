@@ -8,11 +8,13 @@ services:
     # docker.sock はマウントしない（git-push-gate コンテナの中身を読めてしまう）
 
   git-push-gate:
+    # GitHub に書き込める鍵を持つ部品なので、本番ではタグかコミットの SHA に固定する（#main は動き続ける）
     build: https://github.com/tksugimoto/git-push-gate.git#main
     environment:
       UPSTREAM: git@github.com:OWNER/REPO.git
       # PROTECTED_BRANCHES: "main develop"
       # UNLOCK_LIFETIME: 8h   # パスフレーズ付きの鍵を解除しておく時間（既定は無期限）
+      # MAX_PUSH_SIZE: 500m   # 1 回の push で受け付ける大きさの上限（既定 500m）
     volumes:
       # ワークスペースの外に置くこと（dev コンテナから読めない場所）
       - ${HOME}/.config/git-push-gate/REPO:/config:ro

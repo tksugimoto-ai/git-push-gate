@@ -9,6 +9,9 @@ PROTECTED=$(git config --get gate.protected) || PROTECTED=""
 # shellcheck disable=SC2086
 set -- $PROTECTED
 [ $# -gt 0 ] || die "gate.protected が設定されていないか、空です"
+# 下の .github の比較は、木が正しい形（項目が並んでいて重複がない）であることを前提にしている。
+# 並びの壊れた木では ls-tree に .github が見えず、比較をすり抜けるので、fsck が無効なら受け付けない
+[ "$(git config --bool --get receive.fsckObjects || true)" = true ] || die "receive.fsckObjects が有効ではありません"
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 hex40() { printf '%s' "$1" | grep -Eqx '[0-9a-f]{40}'; }
 # 名前を間違えた保護ブランチは何も守らないので、GitHub にない保護ブランチがあれば受け付けない（直前に fetch 済み）
@@ -17,6 +20,7 @@ for b in $PROTECTED; do
 done
 # デフォルトブランチ（master や trunk のこともある）が保護されていなければ受け付けない
 default=$(timeout 60 git ls-remote --symref upstream HEAD | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2 }')
+[ -n "$default" ] || die "GitHub のデフォルトブランチを確かめられません"
 case " $PROTECTED " in
   *" $default "*) ;;
   *) die "デフォルトブランチ ${default:-（不明）} が PROTECTED_BRANCHES に入っていません" ;;
@@ -29,27 +33,39 @@ esac
 # 中身は解析しない。解析すると、GitHub のパーサーとの解釈の違いや、PR のマージコミットで組み合わされた
 # 内容（検査されない）を突かれるため。
 WF=.github/workflows
-entry() { git ls-tree "$1" -- "$2"; }   # パスの項目（mode type oid と、引用符付きのパス）。なければ空
+# git の失敗を「項目なし」と取り違えないよう、どれも失敗したら拒否する（tree_ok などは if や || の中で
+# 呼ばれ、set -e が効かないため、明示的に確かめる）
+entry() { git ls-tree "$1" -- "$2" || die "$1 の $2 を読めません"; }   # パスの項目（mode type oid と、引用符付きのパス）。なければ空
 tree_ok() { # ディレクトリでないもの（シンボリックリンクなど）だと中身を列挙できず、比較をすり抜けるので拒否
   for p in .github "$WF"; do
-    e=$(entry "$1" "$p")
+    e=$(entry "$1" "$p") || exit 1
     [ -z "$e" ] || [ "${e#040000 tree }" != "$e" ] || return 1
   done
 }
-workflows() { git ls-tree -r "$1" -- "$WF/"; }   # パスは常に同じ規則で引用されるので、行どうしで比べてよい
+workflows() { git ls-tree -r "$1" -- "$WF/" || die "$1 のワークフローを読めません"; }   # パスは常に同じ規則で引用されるので、行どうしで比べてよい
+case_ok() { # 大文字・小文字だけが違う .GITHUB や .github/Workflows は、取り違えのもとなので拒否
+  r=$(git ls-tree --name-only "$1") || die "$1 を読めません"
+  [ "$(printf '%s\n' "$r" | grep -ix '\.github' || true)" = "$(printf '%s\n' "$r" | grep -x '\.github' || true)" ] || return 1
+  d=$(git ls-tree --name-only "$1" -- .github/) || die "$1 の .github を読めません"
+  [ "$(printf '%s\n' "$d" | grep -iEx '\.github/(workflows|actions)' || true)" = \
+    "$(printf '%s\n' "$d" | grep -Ex '\.github/(workflows|actions)' || true)" ]
+}
 bases() { # 基準のコミット（保護ブランチと、push 先の今の値）
   for b in $PROTECTED; do git rev-parse "refs/heads/$b"; done
   [ -z "$1" ] || printf '%s\n' "$1"
 }
 check_commit() { # check_commit ref new 今の値（なければ空）
   tree_ok "$2" || die "$1: .github か .github/workflows がディレクトリではありません"
+  case_ok "$2" || die "$1: 大文字・小文字だけが違う .github / workflows / actions は使えません"
   actions=$(entry "$2" .github/actions); same=no
   for c in $(bases "$3"); do
-    if [ "$actions" = "$(entry "$c" .github/actions)" ]; then same=yes; break; fi
+    base=$(entry "$c" .github/actions)
+    if [ "$actions" = "$base" ]; then same=yes; break; fi
   done
   [ "$same" = yes ] || die "$1: .github/actions を変更しているため拒否。人間が push してください"
   allowed=$(for c in $(bases "$3"); do if tree_ok "$c"; then workflows "$c"; fi; done)
-  workflows "$2" | while IFS= read -r line; do
+  files=$(workflows "$2")
+  printf '%s\n' "$files" | grep . | while IFS= read -r line; do
     printf '%s\n' "$allowed" | grep -Fqx -- "$line" \
       || die "$1: .github/workflows を変更しているため拒否（${line#*	}）。人間が push してください"
   done || exit 1
@@ -93,4 +109,5 @@ done
 [ $# -eq 0 ] && exit 0
 timeout 300 git push --atomic --quiet upstream "$@"
 # 受け付けた更新の記録（人間が後で確かめられるように）。GitHub への push が成功したものだけ
-printf '%s' "$log" >> "$(git rev-parse --git-dir)/push-gate.log"
+# （書き込みに失敗しても、GitHub には push 済みなので、クライアントには成功を返す）
+printf '%s' "$log" >> "$(git rev-parse --git-dir)/push-gate.log" || echo "git-push-gate: 警告: 記録を書き込めませんでした" >&2

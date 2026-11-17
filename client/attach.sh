@@ -37,8 +37,11 @@ pub=$(docker port "$GATE" 22/tcp | head -n1)
 [ -n "$pub" ] || die "ゲートのポートがホストに公開されていません（compose の ports を確認してください）"
 port=${pub##*:}; bind=${pub%:*}
 case "$bind" in
-  127.0.0.1|0.0.0.0|'[::]'|'[::1]'|::) host=host.docker.internal ;;   # Docker Desktop
-  *) host=$bind ;;                                                       # Linux の Docker Engine（docker0 の IP）
+  127.0.0.1|'[::1]') host=host.docker.internal ;;   # Docker Desktop
+  0.0.0.0|'[::]'|::)                                # すべてのアドレス（README では非推奨）。Docker の種類で決める
+    if docker info --format '{{.OperatingSystem}}' | grep -q 'Docker Desktop'; then host=host.docker.internal
+    else host=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'); fi ;;
+  *) host=$bind ;;                                  # Linux の Docker Engine（docker0 の IP）
 esac
 host="${GATE_HOST:-$host}"
 

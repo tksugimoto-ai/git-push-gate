@@ -23,6 +23,7 @@ git --git-dir=gate.git config remote.upstream.url "$T/gh.git"
 git --git-dir=gate.git config gate.protected "main develop"   # 以下 3 つは entrypoint.sh が書き込むもの
 git --git-dir=gate.git config receive.fsckObjects true
 git --git-dir=gate.git config receive.denyDeleteCurrent ignore
+git --git-dir=gate.git config receive.autogc false
 # ローカル転送だと quarantine 用の環境変数が上流に漏れるので外す（SSH 越しの GitHub では不要）
 git --git-dir=gate.git config remote.upstream.receivepack \
   'env -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES git-receive-pack'
@@ -46,7 +47,7 @@ expect() { # expect ok|ng 説明 push引数...
   want=$1; desc=$2; shift 2
   if git push "$@" >"$T/out" 2>&1; then got=ok; else got=ng; fi
   # 拒否はゲートか git の正規の拒否によるものに限る（別の理由での失敗を見逃さない）
-  if [ "$got" = ng ] && ! grep -Eq 'git-push-gate:|\[rejected\]' "$T/out"; then got=error; fi
+  if [ "$got" = ng ] && ! grep -Eq 'git-push-gate:|\[rejected\]|fsck error' "$T/out"; then got=error; fi
   if [ "$got" = "$want" ]; then pass=$((pass+1)); echo "ok   $desc"
   else fail=$((fail+1)); echo "FAIL $desc (expected $want)"; sed 's/^/     /' "$T/out"; fi
 }
@@ -98,6 +99,28 @@ git switch -qC w8 origin/main; git rm -rq .github; mkdir -p gh/workflows; echo '
 git add -A; git commit -qm w8;                                     expect ng ".github がシンボリックリンク" origin w8
 git switch -qC w9 origin/main; mkdir -p .github/workflows/sub; echo 'on: push' > .github/workflows/sub/x.yml; git add -A; git commit -qm w9
 expect ng "サブディレクトリへのワークフローの追加" origin w9
+git switch -qC w10 origin/main; mkdir -p .GITHUB/workflows; echo 'on: push' > .GITHUB/workflows/y.yml; git add -A; git commit -qm w10
+expect ng "大文字の .GITHUB" origin w10
+git switch -qC w11 origin/main; mkdir -p .github/Workflows; echo 'on: push' > .github/Workflows/x.yml; git add -A; git commit -qm w11
+expect ng "大文字の .github/Workflows" origin w11
+git switch -qC w12 origin/main; git rm -rq .github/actions; ln -s ../x .github/actions; git add -A; git commit -qm w12
+expect ng ".github/actions がシンボリックリンク" origin w12
+# 並びの壊れた木（zzz の後ろに .github）。ls-tree に .github が見えないので、fsck で止める
+bad=$(python3 - "$(git rev-parse origin/main:.github)" "$(git hash-object -w --stdin </dev/null)" <<'PY' | git hash-object -t tree -w --literally --stdin
+import sys
+gh, empty = (bytes.fromhex(x) for x in sys.argv[1:])
+sys.stdout.buffer.write(b"100644 zzz\0" + empty + b"40000 .github\0" + gh)
+PY
+)
+expect ng "並びの壊れた木" origin "$(git commit-tree "$bad" -p origin/main -m w13):refs/heads/w13"   # 作業ツリーには取り出さない
+git --git-dir="$T/gate.git" config receive.fsckObjects false
+git switch -qC w14 origin/main; echo f > f; git add f; git commit -qm w14
+expect ng "fsck が無効なゲート" origin w14
+git --git-dir="$T/gate.git" config receive.fsckObjects true
+# 複数の ref を 1 回で push したとき、1 つでも拒否なら何も GitHub に届かない
+git switch -qC multi origin/main; echo m > m; git add m; git commit -qm multi
+expect ng "正常な ref と main を同時に push" origin multi HEAD:main
+if gh_has multi; then fail=$((fail+1)); echo "FAIL 拒否された push の一部が GitHub に届いた"; else pass=$((pass+1)); echo "ok   拒否された push は一部も GitHub に届かない"; fi
 # 人間が push したワークフローの上に、エージェントがコミットを積む
 human hw main "printf 'on: pull_request\n' > .github/workflows/ci.yml"
 git switch -qC hw origin/hw; echo c > c; git add c; git commit -qm c

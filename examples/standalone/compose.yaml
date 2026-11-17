@@ -4,12 +4,14 @@
 # クライアント用の秘密鍵 client_key は、config/ の外（このファイルと同じディレクトリ）に置く（client/attach.sh が使う）。
 services:
   git-push-gate:
+    # GitHub に書き込める鍵を持つ部品なので、本番ではタグかコミットの SHA に固定する（#main は動き続ける）
     build: https://github.com/tksugimoto/git-push-gate.git#main
     restart: unless-stopped
     environment:
       UPSTREAM: git@github.com:OWNER/REPO.git
       # PROTECTED_BRANCHES: "main develop"
       # UNLOCK_LIFETIME: 8h   # パスフレーズ付きの鍵を解除しておく時間（既定は無期限）
+      # MAX_PUSH_SIZE: 500m   # 1 回の push で受け付ける大きさの上限（既定 500m）
     ports:
       # 公開先のアドレスは環境で変える（.env に GATE_BIND=172.17.0.1 のように書く）
       #   Docker Desktop（Mac / Windows。WSL2 バックエンドを含む）: 127.0.0.1（既定）

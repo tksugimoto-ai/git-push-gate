@@ -33,7 +33,8 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 - `pre-receive` フックが検査し、通った更新だけをその場で GitHub に push します（`--atomic` と `--force-with-lease`）。lease には、クライアントが送ってきた値ではなく、直前に fetch した GitHub の値を使います。GitHub 側で失敗すればエージェントの push も失敗します。
 - 保護ブランチが GitHub に 1 つでもなければ（名前の間違いなど）、またはデフォルトブランチが保護ブランチに入っていなければ、push を受け付けません。何も守らないまま動くのを防ぐためです。
 - GitHub に push できた更新は、ゲートの `/srv/git/repo.git/push-gate.log` に記録します（`docker compose exec git-push-gate cat /srv/git/repo.git/push-gate.log`）。
-- 受け付けは 10 分、GitHub への push は 5 分で打ち切ります。止まったクライアントが、ほかの push を待たせ続けないためです。ただし、受け付けが時間切れになっても、GitHub への push は終わっていることがあります（クライアントには失敗と返る）。その場合は fetch して確かめてください。
+- ゲートは起動時（パスフレーズ付きの鍵なら unlock の後）に GitHub を fetch します。最初の fetch は全履歴なので時間がかかるためで、UPSTREAM・鍵・known_hosts の間違いもここで分かります（ログに警告が出る）。
+- 受け付けは 10 分、GitHub への push は 5 分で打ち切ります。止まったクライアントが、ほかの push を待たせ続けないためです。ただし、受け付けが時間切れになっても、GitHub への push は終わっていることがあります（クライアントには失敗と返る）。その場合は fetch して確かめてください。記録の書き込みに失敗したときも、GitHub への push は成功として扱います。
 
 ## 拒否するもの
 
@@ -56,7 +57,8 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 - ワークフローの削除は許します（ファイルがなければ動かない）。
 - 人間が変更したワークフローを含むブランチから、エージェントが別のブランチを作って push すると拒否されます（push 先のブランチがまだ GitHub にないため）。
 - 古い main から作ったブランチは、その後 main のワークフローが変わっていると拒否されます。その場合は main に rebase してください。
-- `.github` や `.github/workflows` がシンボリックリンクなど、ディレクトリでなければ拒否します。
+- `.github` や `.github/workflows` がシンボリックリンクなど、ディレクトリでなければ拒否します。大文字・小文字だけが違う `.GITHUB` や `.github/Workflows` も拒否します。
+- 比較は木が正しい形であることを前提にしているので、ゲートは `receive.fsckObjects` で壊れたオブジェクト（並びの壊れた木など）を拒否します。この設定が無効なら、push を受け付けません。
 
 #### 中身を検査しない理由
 
@@ -119,6 +121,7 @@ docker compose exec git-push-gate unlock
 | `UPSTREAM` | 必須。例: `git@github.com:owner/repo.git` |
 | `PROTECTED_BRANCHES` | 保護するブランチ（空白区切り、完全一致。`release/*` のようなパターンは使えない）。すべて GitHub に存在し、デフォルトブランチを含むこと（そうでないと push を受け付けない）。既定 `main develop` |
 | `UNLOCK_LIFETIME` | パスフレーズ付きの鍵を解除しておく時間（例: `8h`）。既定は無期限 |
+| `MAX_PUSH_SIZE` | 1 回の push で受け付ける大きさの上限（`receive.maxInputSize`）。既定 `500m` |
 
 | マウント先 | 内容 |
 |---|---|
