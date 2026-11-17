@@ -185,7 +185,7 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
    - `~/.ssh/config` の `Host git-push-gate`（公開先が `127.0.0.1` なら `host.docker.internal`、それ以外はその IP）
    - `git remote set-url --push origin ssh://git@git-push-gate/repo.git`
 
-   devcontainer から Docker を操作できる（`docker.sock`・`docker-host.sock`・`DOCKER_HOST`）か、SSH エージェントが転送されていれば、設定せずに止めます。最後にゲートへの接続を確かめ、VS Code の git credential helper が有効なら警告します。devcontainer やゲートが自動で見つからないときは、環境変数 `DEVCONTAINER`・`GATE` などで指定します（スクリプトの先頭を参照）。Windows では WSL のシェルから実行してください。
+   devcontainer から Docker を操作できる（`docker.sock`・`docker-host.sock`・`DOCKER_HOST`）か、SSH エージェントが転送されていれば、設定せずに止めます。ただし、これは実行した時点の devcontainer の中を見るだけの確認で、確実ではありません（エージェントはソケットの場所を変えられる）。「devcontainer 側で必要な設定」を守ることが前提です。最後にゲートへの接続を確かめ、VS Code の git credential helper が有効なら警告します。devcontainer やゲートが自動で見つからないときは、環境変数 `DEVCONTAINER`・`GATE` などで指定します（スクリプトの先頭を参照）。Windows では WSL のシェルから実行してください。
 
 ゲートのホスト鍵は `/srv/git` のボリュームに保存されるので、コンテナを作り直しても変わりません。
 
@@ -202,11 +202,13 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
   - ワークスペースの `.git/config`（`core.fsmonitor`、`core.sshCommand` など）や `.git/hooks` は、ホストでそのディレクトリの git を使うと、ホストで実行される。ホストでは、そのワークスペースで git を使わない（別に clone したものを使う）
 - エージェントに渡す GitHub トークン（PR 作成用など）は、対象のリポジトリだけに絞った fine-grained PAT にする
   - **Contents: read**。Contents: write はマージや API 経由のコミットも許してしまう
-  - PR を作るなら **Pull requests: write**（PR の作成・コメントだけで、マージには Contents: write が要る）
+  - PR を作るなら **Pull requests: write**。PR のブランチを更新する API（`PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch`。base を head にマージする）は、GitHub のドキュメントでは Pull requests: write だけで呼べるように書かれているが、Contents: read の fine-grained PAT では「user doesn't have permission to update head repository」（403）で拒否されることを確かめた（2026-11、持ち主が書き込めるアカウントの PAT）。Contents: write を付けると、head が main の PR を作ってこれを呼ぶだけで main を書き換えられるので、付けないこと
   - **Actions: write は付けない**（`workflow_dispatch` や再実行で、保護ブランチのワークフローを動かせてしまう）
   - classic PAT の `repo` スコープは書き込みも含むので使わない
 
 ## 限界
+
+- ゲートが守れるのは git の push だけです。エージェントのトークンに書き込みの権限（Contents: write、Actions: write など）があれば、GitHub の API でゲートを迂回できます（上記のトークンの権限を参照）。
 
 - クライアント側のガードではなくサーバー側の強制ですが、GitHub のブランチ保護の代わりにはなりません。使えるならそちらが確実です。
 - ワークフローが実行するコード（`npm test` から呼ばれるスクリプト、`.github/actions` 以外に置いたローカルアクション（`uses: ./tools/x` など）等）はエージェントが変更できます（上記「前提条件」）。
