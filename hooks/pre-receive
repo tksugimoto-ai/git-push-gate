@@ -33,11 +33,11 @@ default_tip=$(tip "refs/heads/$default")
 # ワークフローと複合アクションは、エージェントには変更させない（人間が push する）。
 # 中身は解析しない。解析すると、GitHub のパーサーとの解釈の違いや、PR のマージコミットで組み合わされた
 # 内容（検査されない）を突かれるため。許すのは、次の「基準」に収まる内容だけ:
-#   - 保護ブランチのどれか 1 つ（複数の保護ブランチの版を混ぜることはさせない）
-#   - push 先のブランチで、人間が変更したもの（デフォルトブランチとの分岐点の版と違うもの）。
-#     人間が push したワークフローの上に、エージェントがコミットを積めるように。分岐点と同じもの
-#     （main から写しただけの古い版）は含めないので、人間が main のワークフローを直した後に、
-#     既存のブランチで古い版を動かし続けることはできない
+#   保護ブランチのどれか 1 つの内容 ＋ push 先のブランチの GitHub 上の今の内容
+# push 先の今の内容は、人間が push したものか、ゲートを通った（＝その時の基準に収まった）ものだけ。
+# これで、人間が push したワークフローの上にエージェントがコミットを積め、main に rebase もできる。
+# 複数の保護ブランチの版を 1 つのコミットで混ぜることはさせない。
+# 履歴（親や分岐点）は使わない。エージェントが自由に作れるため
 WF=.github/workflows
 # git の失敗を「項目なし」と取り違えないよう、どれも失敗したら拒否する（tree_ok などは if や || の中で
 # 呼ばれ、set -e が効かないため、明示的に確かめる）
@@ -62,31 +62,20 @@ subset() { # subset 行の一覧 許す行の一覧: 前者のすべての行が
   done
 }
 check_commit() { # check_commit ref new 今の値（なければ空）
+  # ブランチにはコミットだけを置かせる（注釈付きタグのオブジェクトなども ls-tree は中を見てしまう）
+  [ "$(git cat-file -t "$2" 2>/dev/null || true)" = commit ] || die "$1: コミット以外は push できません"
   tree_ok "$2" || die "$1: .github か .github/workflows がディレクトリではありません"
   case_ok "$2" || die "$1: 大文字・小文字だけが違う .github / workflows / actions は使えません"
   files=$(workflows "$2"); actions=$(entry "$2" .github/actions)
-  # push 先のブランチで人間が変更したもの
-  human=""; human_actions=no
-  if [ -n "$3" ] && tree_ok "$3"; then
-    mb=$(git merge-base "$3" "$default_tip" || true)   # 共通の祖先がなければ、人間の変更はないものとする
-    if [ -n "$mb" ]; then
-      tree_ok "$mb" && fork=$(workflows "$mb") || fork=""
-      human=$(workflows "$3" | while IFS= read -r line; do
-        printf '%s\n' "$fork" | grep -Fqx -- "$line" || printf '%s\n' "$line"
-      done)
-      [ "$(entry "$3" .github/actions)" = "$(entry "$mb" .github/actions)" ] || human_actions=yes
-    fi
-  fi
-  [ "$human_actions" = yes ] && cur_actions=$(entry "$3" .github/actions) || cur_actions=""
+  cur_files=""; cur_actions=none
+  if [ -n "$3" ] && tree_ok "$3"; then cur_files=$(workflows "$3"); cur_actions=$(entry "$3" .github/actions); fi
   for b in $PROTECTED; do
     c=$(tip "refs/heads/$b"); tree_ok "$c" || continue
-    base_actions=$(entry "$c" .github/actions)
-    if [ "$actions" = "$base_actions" ] || { [ "$human_actions" = yes ] && [ "$actions" = "$cur_actions" ]; }; then
-      allowed=$(workflows "$c"; printf '%s\n' "$human")
-      if subset "$files" "$allowed"; then return 0; fi
-    fi
+    base_files=$(workflows "$c"); base_actions=$(entry "$c" .github/actions)
+    [ "$actions" = "$base_actions" ] || [ "$actions" = "$cur_actions" ] || continue
+    if subset "$files" "$(printf '%s\n%s\n' "$base_files" "$cur_files")"; then return 0; fi
   done
-  die "$1: .github/workflows か .github/actions を変更しているため拒否（保護ブランチの 1 つに、このブランチで人間が変更したものを加えた内容と一致しない）。人間が push するか、main に rebase してください"
+  die "$1: .github/workflows か .github/actions を変更しているため拒否（保護ブランチの 1 つと、このブランチの今の内容に収まらない）。人間が push してください"
 }
 
 set --; log=""

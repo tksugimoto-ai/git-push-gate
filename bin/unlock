@@ -10,5 +10,5 @@ fi
 # UNLOCK_LIFETIME（例: 8h）を指定すると、その時間で自動的に再ロックされる
 su -s /bin/sh git -c "SSH_AUTH_SOCK=$SOCK ssh-add ${UNLOCK_LIFETIME:+-t $UNLOCK_LIFETIME} /home/git/.ssh/github_key"
 # 最初の fetch（全履歴）は時間がかかるので、push の前に時間制限なしで済ませておく
-su -s /bin/sh git -c "flock /srv/git/repo.git/push-gate.lock git --git-dir=/srv/git/repo.git fetch --prune --no-tags --quiet upstream '+refs/heads/*:refs/heads/*'" \
+su -s /bin/sh git -c "flock /srv/git/repo.git/push-gate.lock git -c gc.auto=0 -c maintenance.auto=false --git-dir=/srv/git/repo.git fetch --prune --no-tags --quiet upstream '+refs/heads/*:refs/heads/*'" \
   || echo "unlock: 警告: GitHub から fetch できません（UPSTREAM・鍵・known_hosts を確認してください）" >&2

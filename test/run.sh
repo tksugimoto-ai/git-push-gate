@@ -179,9 +179,17 @@ expect ok "古い版になる前のブランチの作成" origin stale
   && printf 'on: push\n# fixed\n' > .github/workflows/ci.yml && git commit -qam "fix $b" && git push -q origin "HEAD:$b"; done )
 git fetch -q
 echo s2 >> s; git commit -qam stale2
-expect ng "人間が main を直した後の、古い版を持つブランチへの push" origin stale
+# 既存のブランチは、今の内容（古い版）のまま積める。取り消しは人間が行う（README）。
+# push で動くワークフローはブランチ側の版、pull_request で動くものはマージコミット（main の版）が使われる
+expect ok "人間が main を直した後の、古い版を持つ既存のブランチへの push" origin stale
+old_stale=$(git rev-parse HEAD)
 git rebase -q origin/main
 expect ok "main に rebase した後の push" --force origin stale
+# 古い版を、まだ GitHub にないブランチに写すのは拒否
+expect ng "古い版を持つ新しいブランチ" origin "$old_stale:refs/heads/stale-copy"
+# ブランチにはコミットだけ（注釈付きタグのオブジェクトは拒否）
+git tag -a -m t tobj origin/main
+expect ng "注釈付きタグのオブジェクトをブランチに" origin "$(git rev-parse tobj):refs/heads/tagobj"
 # 許可する接頭辞
 git --git-dir="$T/gate.git" config gate.allowedPrefixes "agent/ claude/"
 git switch -qC pfx origin/main; echo p > p; git add p; git commit -qm pfx
