@@ -54,6 +54,10 @@ printf '%s\n' "$keys" | sed 's|^|command="/usr/local/bin/git-push-gate",restrict
 chown git:git /home/git/.ssh/authorized_keys && chmod 600 /home/git/.ssh/authorized_keys
 
 [ -d "$REPO" ] || git init -q --bare "$REPO"
+# /srv/git は git ユーザーの持ち物なので、root が書き込む前に、シンボリックリンクに差し替えられていないか確かめる
+for p in "$REPO" "$REPO/config" "$REPO/hooks" "$REPO/hooks/pre-receive"; do
+  [ ! -L "$p" ] || die "$p がシンボリックリンクです"
+done
 g config remote.upstream.url "$UPSTREAM"   # fetch refspec は付けない
 g config core.sshCommand "$ssh_cmd"
 if [ -n "$agent_sock" ]; then
@@ -80,8 +84,8 @@ g config receive.autogc false
 # 受け付ける大きさの上限（ボリュームを埋められないように）
 g config receive.maxInputSize "${MAX_PUSH_SIZE:-500m}"
 install -o root -g root -m 755 /usr/local/share/git-push-gate/pre-receive "$REPO/hooks/pre-receive"
-chown -R git:git "$REPO"
-chown root:root "$REPO/hooks" "$REPO/hooks/pre-receive" "$REPO/config"
+chown -R -h git:git "$REPO"   # -h: シンボリックリンクの先を変えない
+chown -h root:root "$REPO/hooks" "$REPO/hooks/pre-receive" "$REPO/config"
 chmod 644 "$REPO/config"
 
 # ホスト鍵はボリュームに置き、コンテナを作り直しても変わらないようにする（クライアントの known_hosts が合うように）
@@ -95,4 +99,6 @@ if [ -z "$agent_sock" ]; then
   su -s /bin/sh git -c "git --git-dir=$REPO fetch --prune --no-tags --quiet upstream '+refs/heads/*:refs/heads/*'" \
     || echo "entrypoint: 警告: GitHub から fetch できません（UPSTREAM・鍵・known_hosts を確認してください）" >&2
 fi
+# push の中では gc を止めているので、起動時に整理する（push を受け付ける前なのでロックは要らない）
+su -s /bin/sh git -c "git --git-dir=$REPO gc --auto --quiet" || echo "entrypoint: 警告: gc に失敗しました" >&2
 exec /usr/sbin/sshd -D -e -h "$HOSTKEYS/ssh_host_ed25519_key"

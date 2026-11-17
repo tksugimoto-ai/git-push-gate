@@ -150,6 +150,9 @@ expect ng "refs/ で始まるブランチ名" origin odd:refs/heads/refs/tags/v1
 git --git-dir="$T/gate.git" config gate.protected " "
 expect ng "保護ブランチの一覧が空のときの削除" origin :develop
 git --git-dir="$T/gate.git" config gate.protected "main develop"
+expect ng "- で始まるブランチ名" origin odd:refs/heads/-x
+expect ng "+ で始まるブランチ名" origin odd:refs/heads/+x
+expect ng "@ という名前のブランチ" origin odd:refs/heads/@
 expect ng "40 桁の 16 進数のブランチ名" origin "odd:refs/heads/$(git rev-parse HEAD)"
 # デフォルトブランチ（main）が保護ブランチに入っていない
 git --git-dir="$T/gate.git" config gate.protected "develop"
@@ -159,6 +162,10 @@ git --git-dir="$T/gate.git" config gate.protected "main develop"
 if printf 'x refs/heads/main refs/heads/evil\n' | (cd "$T/gate.git" && GIT_DIR=. sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 \
    || ! grep -q '不正な更新の指定' "$T/out"
 then fail=$((fail+1)); echo "FAIL 不正な形式の行は拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   不正な形式の行は拒否"; fi
+# ref 名の末尾に空白がある行（read で区切ると取り除かれ、整えた名前で GitHub に push してしまう）
+if printf '%s %s refs/heads/trail \n' 0000000000000000000000000000000000000000 "$(git rev-parse origin/main)" \
+   | (cd "$T/gate.git" && GIT_DIR=. sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 || ! grep -q '不正な更新の指定' "$T/out" || gh_has trail
+then fail=$((fail+1)); echo "FAIL 末尾に空白のある行は拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   末尾に空白のある行は拒否"; fi
 git switch -qC act origin/main; echo y >> .github/actions/a/action.yml; git commit -qam act
 expect ng ".github/actions の変更" origin act
 git switch -qC co origin/main; echo "* @me" > .github/CODEOWNERS; git add -A; git commit -qm co
@@ -172,6 +179,9 @@ git switch -qC mix origin/main; git checkout -q origin/develop -- .github/workfl
 expect ng "main と develop の版を混ぜたコミット" origin mix
 git switch -qC dvok origin/develop; echo d > d; git add d; git commit -qm dvok
 expect ok "develop の内容そのままのコミット" origin dvok
+# 2 回に分ければ混ぜられる（develop の内容のブランチに、main の .github/actions を載せる）。README の限界に記載
+git checkout -q origin/main -- .github/actions; git commit -qm mix2
+expect ok "2 回に分けて main と develop の版を混ぜる（既知の限界）" origin dvok
 # 人間が main と develop のワークフローを直した後、古い版を持つ既存のブランチ
 git switch -qC stale origin/main; echo s > s; git add s; git commit -qm stale
 expect ok "古い版になる前のブランチの作成" origin stale

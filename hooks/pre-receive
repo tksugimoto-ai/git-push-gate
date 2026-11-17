@@ -79,7 +79,11 @@ check_commit() { # check_commit ref new 今の値（なければ空）
 }
 
 set --; log=""
-while read -r old new ref; do
+while IFS= read -r line; do
+  # 行をそのまま読み、「old new ref」の形でなければ拒否する（read で区切ると、末尾の空白などが取り除かれ、
+  # receive-pack が後で拒否する名前を、整えた名前で GitHub に push してしまう）
+  old=${line%% *}; rest=${line#* }; new=${rest%% *}; ref=${rest#* }
+  [ "$line" = "$old $new $ref" ] && [ "$ref" = "${ref%%[[:space:]]*}" ] || die "不正な更新の指定です"
   # receive-pack は ref 名を検査する前にフックへ渡すので、行の形式から確かめる（改行を埋め込んだ ref 名など）
   hex40 "$old" && hex40 "$new" || die "不正な更新の指定です"
   case "$ref" in
@@ -90,7 +94,9 @@ while read -r old new ref; do
   name=${ref#refs/heads/}
   # 人間やツールが取り違える名前（HEAD、refs/tags/v1 のようにタグや別の ref に見えるもの）は作らせない。
   # 40 桁の 16 進数の名前は、push の指定でコミット ID と取り違えられる（検査したものと別のものが push される）
-  if [ "$name" = HEAD ] || [ "${name#refs/}" != "$name" ] || hex40 "$name"; then
+  # - や + で始まる名前はオプションや強制 push の指定と、@ は HEAD の別名と取り違えられる
+  if [ "$name" = HEAD ] || [ "$name" = @ ] || [ "${name#refs/}" != "$name" ] || hex40 "$name" \
+     || [ "${name#[-+]}" != "$name" ]; then
     die "$ref は紛らわしい名前のため拒否"
   fi
   # 保護ブランチ（大文字・小文字だけが違う Main なども含む）
