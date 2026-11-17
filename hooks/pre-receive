@@ -4,8 +4,11 @@
 set -euf   # -f: 保護ブランチ名をグロブ展開しない
 zero=0000000000000000000000000000000000000000
 die() { echo "git-push-gate: $*" >&2; exit 1; }
-# 保護ブランチは entrypoint がリポジトリの設定に書き込む（sshd 経由では環境変数が届かないため）
+# ブランチは名前どおりに引く（rev-parse はないと refs/tags/... などに読み替えるので使わない）
+tip() { git show-ref --verify --hash "$1" 2>/dev/null || true; }
+# 保護ブランチなどは entrypoint がリポジトリの設定に書き込む（sshd 経由では環境変数が届かないため）
 PROTECTED=$(git config --get gate.protected) || PROTECTED=""
+PREFIXES=$(git config --get gate.allowedPrefixes) || PREFIXES=""
 # shellcheck disable=SC2086
 set -- $PROTECTED
 [ $# -gt 0 ] || die "gate.protected が設定されていないか、空です"
@@ -16,7 +19,7 @@ lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 hex40() { printf '%s' "$1" | grep -Eqx '[0-9a-f]{40}'; }
 # 名前を間違えた保護ブランチは何も守らないので、GitHub にない保護ブランチがあれば受け付けない（直前に fetch 済み）
 for b in $PROTECTED; do
-  git rev-parse -q --verify "refs/heads/$b" >/dev/null || die "保護ブランチ $b が GitHub にありません。PROTECTED_BRANCHES を確認してください"
+  [ -n "$(tip "refs/heads/$b")" ] || die "保護ブランチ $b が GitHub にありません。PROTECTED_BRANCHES を確認してください"
 done
 # デフォルトブランチ（master や trunk のこともある）が保護されていなければ受け付けない
 default=$(timeout 60 git ls-remote --symref upstream HEAD | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2 }')
@@ -25,13 +28,16 @@ case " $PROTECTED " in
   *" $default "*) ;;
   *) die "デフォルトブランチ ${default:-（不明）} が PROTECTED_BRANCHES に入っていません" ;;
 esac
+default_tip=$(tip "refs/heads/$default")
 
 # ワークフローと複合アクションは、エージェントには変更させない（人間が push する）。
-# 許すのは「基準」のどれかと同一の内容だけ。基準は保護ブランチと、push 先のブランチの GitHub 上の今の内容
-# （人間が push したワークフローの上に、エージェントがコミットを積めるように）。
-# 基準の内容は、人間が push したものか、ゲートを通った（＝その時の基準と同一だった）ものだけになる。
 # 中身は解析しない。解析すると、GitHub のパーサーとの解釈の違いや、PR のマージコミットで組み合わされた
-# 内容（検査されない）を突かれるため。
+# 内容（検査されない）を突かれるため。許すのは、次の「基準」に収まる内容だけ:
+#   - 保護ブランチのどれか 1 つ（複数の保護ブランチの版を混ぜることはさせない）
+#   - push 先のブランチで、人間が変更したもの（デフォルトブランチとの分岐点の版と違うもの）。
+#     人間が push したワークフローの上に、エージェントがコミットを積めるように。分岐点と同じもの
+#     （main から写しただけの古い版）は含めないので、人間が main のワークフローを直した後に、
+#     既存のブランチで古い版を動かし続けることはできない
 WF=.github/workflows
 # git の失敗を「項目なし」と取り違えないよう、どれも失敗したら拒否する（tree_ok などは if や || の中で
 # 呼ばれ、set -e が効かないため、明示的に確かめる）
@@ -50,25 +56,37 @@ case_ok() { # 大文字・小文字だけが違う .GITHUB や .github/Workflows
   [ "$(printf '%s\n' "$d" | grep -iEx '\.github/(workflows|actions)' || true)" = \
     "$(printf '%s\n' "$d" | grep -Ex '\.github/(workflows|actions)' || true)" ]
 }
-bases() { # 基準のコミット（保護ブランチと、push 先の今の値）
-  for b in $PROTECTED; do git rev-parse "refs/heads/$b"; done
-  [ -z "$1" ] || printf '%s\n' "$1"
+subset() { # subset 行の一覧 許す行の一覧: 前者のすべての行が後者にあれば真
+  printf '%s\n' "$1" | grep . | while IFS= read -r line; do
+    printf '%s\n' "$2" | grep -Fqx -- "$line" || exit 1
+  done
 }
 check_commit() { # check_commit ref new 今の値（なければ空）
   tree_ok "$2" || die "$1: .github か .github/workflows がディレクトリではありません"
   case_ok "$2" || die "$1: 大文字・小文字だけが違う .github / workflows / actions は使えません"
-  actions=$(entry "$2" .github/actions); same=no
-  for c in $(bases "$3"); do
-    base=$(entry "$c" .github/actions)
-    if [ "$actions" = "$base" ]; then same=yes; break; fi
+  files=$(workflows "$2"); actions=$(entry "$2" .github/actions)
+  # push 先のブランチで人間が変更したもの
+  human=""; human_actions=no
+  if [ -n "$3" ] && tree_ok "$3"; then
+    mb=$(git merge-base "$3" "$default_tip" || true)   # 共通の祖先がなければ、人間の変更はないものとする
+    if [ -n "$mb" ]; then
+      tree_ok "$mb" && fork=$(workflows "$mb") || fork=""
+      human=$(workflows "$3" | while IFS= read -r line; do
+        printf '%s\n' "$fork" | grep -Fqx -- "$line" || printf '%s\n' "$line"
+      done)
+      [ "$(entry "$3" .github/actions)" = "$(entry "$mb" .github/actions)" ] || human_actions=yes
+    fi
+  fi
+  [ "$human_actions" = yes ] && cur_actions=$(entry "$3" .github/actions) || cur_actions=""
+  for b in $PROTECTED; do
+    c=$(tip "refs/heads/$b"); tree_ok "$c" || continue
+    base_actions=$(entry "$c" .github/actions)
+    if [ "$actions" = "$base_actions" ] || { [ "$human_actions" = yes ] && [ "$actions" = "$cur_actions" ]; }; then
+      allowed=$(workflows "$c"; printf '%s\n' "$human")
+      if subset "$files" "$allowed"; then return 0; fi
+    fi
   done
-  [ "$same" = yes ] || die "$1: .github/actions を変更しているため拒否。人間が push してください"
-  allowed=$(for c in $(bases "$3"); do if tree_ok "$c"; then workflows "$c"; fi; done)
-  files=$(workflows "$2")
-  printf '%s\n' "$files" | grep . | while IFS= read -r line; do
-    printf '%s\n' "$allowed" | grep -Fqx -- "$line" \
-      || die "$1: .github/workflows を変更しているため拒否（${line#*	}）。人間が push してください"
-  done || exit 1
+  die "$1: .github/workflows か .github/actions を変更しているため拒否（保護ブランチの 1 つに、このブランチで人間が変更したものを加えた内容と一致しない）。人間が push するか、main に rebase してください"
 }
 
 set --; log=""
@@ -90,10 +108,16 @@ while read -r old new ref; do
   for b in $PROTECTED; do
     [ "$(lower "$name")" != "$(lower "$b")" ] || die "$ref への push は禁止"
   done
+  # 許可する接頭辞（ALLOWED_BRANCH_PREFIXES）が設定されていれば、それ以外のブランチは作成・更新・削除させない
+  if [ -n "$PREFIXES" ]; then
+    okp=no
+    for p in $PREFIXES; do [ "${name#"$p"}" = "$name" ] || okp=yes; done
+    [ "$okp" = yes ] || die "$ref は許可された接頭辞（$PREFIXES）で始まっていません"
+  fi
 
   # 直前に fetch した GitHub の値を lease にする（その間に誰かが push していたら失敗）。
   # クライアントが送ってきた old は信用せず、fetch した値と一致することを確かめる
-  expect=$(git rev-parse -q --verify "$ref" || true)
+  expect=$(tip "$ref")
   [ "$old" = "${expect:-$zero}" ] || die "$ref は GitHub 側で更新されています。fetch してからやり直してください"
   if [ "$new" = "$zero" ]; then
     spec=":$ref"                       # ブランチ削除

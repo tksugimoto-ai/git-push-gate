@@ -106,12 +106,14 @@ expect ng "大文字の .github/Workflows" origin w11
 git switch -qC w12 origin/main; git rm -rq .github/actions; ln -s ../x .github/actions; git add -A; git commit -qm w12
 expect ng ".github/actions がシンボリックリンク" origin w12
 # 並びの壊れた木（zzz の後ろに .github）。ls-tree に .github が見えないので、fsck で止める
+command -v python3 >/dev/null || { echo "FAIL このテストには python3 が必要です"; exit 1; }
 bad=$(python3 - "$(git rev-parse origin/main:.github)" "$(git hash-object -w --stdin </dev/null)" <<'PY' | git hash-object -t tree -w --literally --stdin
 import sys
 gh, empty = (bytes.fromhex(x) for x in sys.argv[1:])
 sys.stdout.buffer.write(b"100644 zzz\0" + empty + b"40000 .github\0" + gh)
 PY
 )
+[ "$bad" != 4b825dc642cb6eb9a060e54bf8d69288fbee4904 ] || { echo "FAIL 並びの壊れた木を作れませんでした"; exit 1; }
 expect ng "並びの壊れた木" origin "$(git commit-tree "$bad" -p origin/main -m w13):refs/heads/w13"   # 作業ツリーには取り出さない
 git --git-dir="$T/gate.git" config receive.fsckObjects false
 git switch -qC w14 origin/main; echo f > f; git add f; git commit -qm w14
@@ -161,6 +163,32 @@ git switch -qC act origin/main; echo y >> .github/actions/a/action.yml; git comm
 expect ng ".github/actions の変更" origin act
 git switch -qC co origin/main; echo "* @me" > .github/CODEOWNERS; git add -A; git commit -qm co
 expect ok "CODEOWNERS の変更" origin co
+
+# 複数の保護ブランチの版を 1 つのコミットで混ぜる（develop にだけあるワークフローと、main の .github/actions）
+( cd "$T/seed" && git fetch -q && git switch -qC dv origin/develop && echo 'on: push' > .github/workflows/dev-only.yml \
+  && echo dv >> .github/actions/a/action.yml && git add -A && git commit -qm dv && git push -q origin HEAD:develop )
+git fetch -q
+git switch -qC mix origin/main; git checkout -q origin/develop -- .github/workflows/dev-only.yml; git commit -qm mix
+expect ng "main と develop の版を混ぜたコミット" origin mix
+git switch -qC dvok origin/develop; echo d > d; git add d; git commit -qm dvok
+expect ok "develop の内容そのままのコミット" origin dvok
+# 人間が main と develop のワークフローを直した後、古い版を持つ既存のブランチ
+git switch -qC stale origin/main; echo s > s; git add s; git commit -qm stale
+expect ok "古い版になる前のブランチの作成" origin stale
+( cd "$T/seed" && git fetch -q && for b in main develop; do git switch -qC "fix-$b" "origin/$b" \
+  && printf 'on: push\n# fixed\n' > .github/workflows/ci.yml && git commit -qam "fix $b" && git push -q origin "HEAD:$b"; done )
+git fetch -q
+echo s2 >> s; git commit -qam stale2
+expect ng "人間が main を直した後の、古い版を持つブランチへの push" origin stale
+git rebase -q origin/main
+expect ok "main に rebase した後の push" --force origin stale
+# 許可する接頭辞
+git --git-dir="$T/gate.git" config gate.allowedPrefixes "agent/ claude/"
+git switch -qC pfx origin/main; echo p > p; git add p; git commit -qm pfx
+expect ng "許可されていない接頭辞のブランチ" origin pfx
+expect ok "許可された接頭辞のブランチ" origin pfx:refs/heads/agent/pfx
+expect ng "許可されていない接頭辞のブランチの削除" origin :stale
+git --git-dir="$T/gate.git" config --unset gate.allowedPrefixes
 
 # パスフレーズ付きの鍵が未解除のとき
 if command -v ssh-agent >/dev/null; then

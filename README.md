@@ -47,16 +47,16 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 
 ### ワークフローと複合アクション
 
-エージェントが push したブランチの `.github/workflows` の各ファイルと `.github/actions` は、次の「基準」のどれかと**同一**でなければ拒否します。中身は解析しません。
+エージェントが push したブランチの `.github/workflows` と `.github/actions` は、次の「基準」に収まらなければ拒否します。中身は解析せず、ファイルが**同一**かどうかだけを見ます。
 
-- 保護ブランチ（main / develop など）
-- push 先のブランチの、GitHub 上の今の内容
+- 保護ブランチの**どれか 1 つ**（main / develop など）の内容。複数の保護ブランチの版を混ぜることはできません
+- それに加えて、push 先のブランチ（GitHub 上の今の内容）で**人間が変更したもの**。デフォルトブランチとの分岐点の版と違うファイルを、人間が変更したものとみなします
 
-ワークフローを変えたいときは、人間がホストから GitHub に直接 push してください。push 先のブランチが基準に入るので、人間が変更したワークフローの上には、エージェントがそのままコミットを積めます（rebase や強制 push も、ワークフローに触れなければ通ります）。基準に入る内容は、人間が push したものか、ゲートを通った（＝その時の基準と同一だった）ものだけです。
+ワークフローを変えたいときは、人間がホストから GitHub に直接 push してください。人間が変更したワークフローの上には、エージェントがそのままコミットを積めます（rebase や強制 push も、ワークフローに触れなければ通ります）。人間が変更したものとみなされるのは、人間が push したものだけです（エージェントはワークフローを変えられないため）。
 
 - ワークフローの削除は許します（ファイルがなければ動かない）。
 - 人間が変更したワークフローを含むブランチから、エージェントが別のブランチを作って push すると拒否されます（push 先のブランチがまだ GitHub にないため）。
-- 古い main から作ったブランチは、その後 main のワークフローが変わっていると拒否されます。その場合は main に rebase してください。
+- main から写しただけのワークフローは、人間が変更したものとはみなしません。そのため、人間が main（と develop）のワークフローを直すと、古い版を持つ既存のブランチへの push は拒否されます。エージェントが先にブランチを作っておいて、直す前の古いワークフローを動かし続けることはできません。その場合は main に rebase してください。
 - `.github` や `.github/workflows` がシンボリックリンクなど、ディレクトリでなければ拒否します。大文字・小文字だけが違う `.GITHUB` や `.github/Workflows` も拒否します。
 - 比較は木が正しい形であることを前提にしているので、ゲートは `receive.fsckObjects` で壊れたオブジェクト（並びの壊れた木など）を拒否します。この設定が無効なら、push を受け付けません。
 
@@ -68,7 +68,7 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 - YAML の解釈は、パーサーごとに細かく違います（単独の CR を改行とみなすかなど）。ゲートと GitHub の解釈が 1 か所でも違えば、検査をすり抜けられます。
 - `pull_request_target` は、PR の head ではなく **base ブランチ**のワークフローが、write 権限とシークレット付きで動きます。エージェントは自分の push したブランチを base にした PR を作れるので、エージェントが書いたワークフローが特権付きで動いてしまいます。
 
-同一かどうかだけを見る方式なら、解析は要らず、動くワークフローは常に人間が書いたものになります。ただし、人間が書いた 2 つの版（main と develop、または main と人間が変更した feature ブランチ）を、エージェントが PR のマージで組み合わせることは理論上できます。
+同一かどうかだけを見る方式なら、解析は要らず、動くワークフローは常に人間が書いたものになります。ただし、人間が書いた 2 つの版（main と develop など）を、それぞれに収まる 2 つのブランチの PR のマージコミットで組み合わせることは、理論上できます。
 
 ## 使い方
 
@@ -120,7 +120,8 @@ docker compose exec git-push-gate unlock
 |---|---|
 | `UPSTREAM` | 必須。例: `git@github.com:owner/repo.git` |
 | `PROTECTED_BRANCHES` | 保護するブランチ（空白区切り、完全一致。`release/*` のようなパターンは使えない）。すべて GitHub に存在し、デフォルトブランチを含むこと（そうでないと push を受け付けない）。既定 `main develop` |
-| `UNLOCK_LIFETIME` | パスフレーズ付きの鍵を解除しておく時間（例: `8h`）。既定は無期限 |
+| `UNLOCK_LIFETIME` | パスフレーズ付きの鍵を解除しておく時間（例: `8h`）。既定は無期限。コンテナを再起動すると（`docker compose restart` を含む）、鍵はロックされ直すので、もう一度 `unlock` が必要 |
+| `ALLOWED_BRANCH_PREFIXES` | 設定すると、この接頭辞（空白区切り。例: `agent/ claude/`）で始まるブランチしか作成・更新・削除させない。人間のブランチを強制 push・削除させない、`gh-pages` やワークフローの `branches:` に合う名前を作らせない、のに使う。既定は制限なし |
 | `MAX_PUSH_SIZE` | 1 回の push で受け付ける大きさの上限（`receive.maxInputSize`）。既定 `500m` |
 
 | マウント先 | 内容 |
@@ -169,7 +170,7 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
    ```sh
    ssh-keygen -t ed25519 -N '' -C git-push-gate-client -f client_key
    cat client_key.pub >> config/client_keys.pub
-   docker compose restart
+   docker compose restart   # パスフレーズ付きの鍵なら、この後もう一度 unlock する
    ```
 
 2. devcontainer を起動したら（リビルドのたびに）、ホストで、このリポジトリを clone したディレクトリから、ワークスペースのディレクトリを指定して [client/attach.sh](client/attach.sh) を実行します。
@@ -193,8 +194,11 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 
 ゲートを置いても、エージェントの環境に書き込み可能な認証情報があれば意味がありません。
 
-- VS Code の `dev.containers.gitCredentialHelperConfigLocation` を `none` にする（ホストの認証情報の自動転送を止める）
-- SSH エージェントを転送しない
+- VS Code のユーザー設定で、次の 3 つを止める（どれも、ゲートを通らずに GitHub に push できる認証情報を devcontainer に渡す仕組み。実際の VS Code での確認はまだ）
+  - `dev.containers.gitCredentialHelperConfigLocation` を `none`（ホストの git の認証情報の転送）
+  - `git.terminalAuthentication` を `false`（統合ターミナルに `GIT_ASKPASS` を設定し、VS Code が HTTPS の認証に答える仕組み）
+  - `github.gitAuthentication` を `false`（その答えに、VS Code にサインインしている GitHub のアカウントを使う仕組み。サインインしていなくても、push のときにサインインを求める画面が出る）
+- SSH エージェントを転送しない。Dev Containers には転送を止める設定がなく、ホストに `SSH_AUTH_SOCK` があれば転送される。ホストのエージェントに GitHub の鍵を読み込ませないか、エージェントのない状態で VS Code を起動する
 - `docker.sock` をマウントしない（docker-outside-of-docker の Feature なども使わない）
 - ゲートの設定ディレクトリ（`~/.config/git-push-gate` など）をマウントしない
 - **devcontainer の定義とワークスペースの `.git` は、エージェントが書き換えられる**ことに注意する
@@ -226,7 +230,7 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 
 ## テスト
 
-Docker なしで動く結合テストがあります（git と、util-linux の flock、GNU coreutils か busybox の timeout が必要。macOS ではそのままでは動きません）。
+Docker なしで動く結合テストがあります（git、util-linux の flock、GNU coreutils か busybox の timeout、python3 が必要。macOS ではそのままでは動きません）。
 
 ```sh
 sh test/run.sh

@@ -62,6 +62,14 @@ else
   g config --unset gate.agentSocket || true
 fi
 g config gate.protected "$PROTECTED"
+# 許可する接頭辞（空白区切り。例: "agent/ claude/"）。設定すると、それ以外のブランチは作成・更新・削除させない
+PREFIXES="${ALLOWED_BRANCH_PREFIXES:-}"
+case "$PREFIXES" in
+  *[*?[]*) die "ALLOWED_BRANCH_PREFIXES にパターンは使えません（接頭辞を列挙）: $PREFIXES" ;;
+esac
+# shellcheck disable=SC2086
+set -- $PREFIXES; PREFIXES="$*"; set --
+if [ -n "$PREFIXES" ]; then g config gate.allowedPrefixes "$PREFIXES"; else g config --unset gate.allowedPrefixes || true; fi
 # 壊れたオブジェクト（同じ名前の項目が 2 つある木など）は受け付けない
 g config receive.fsckObjects true
 # bare リポジトリの HEAD が指すブランチ（master など）の削除を receive-pack が拒否すると、
@@ -84,7 +92,7 @@ install -d -o root -g root -m 700 "$HOSTKEYS"
 # 最初の fetch（全履歴）は時間がかかるので、push の前に時間制限なしで済ませておく。
 # UPSTREAM・鍵・known_hosts の間違いもここで分かる。パスフレーズ付きの鍵は unlock の後に行う
 if [ -z "$agent_sock" ]; then
-  su -s /bin/sh git -c "git --git-dir=$REPO fetch --prune --quiet upstream '+refs/heads/*:refs/heads/*'" \
+  su -s /bin/sh git -c "git --git-dir=$REPO fetch --prune --no-tags --quiet upstream '+refs/heads/*:refs/heads/*'" \
     || echo "entrypoint: 警告: GitHub から fetch できません（UPSTREAM・鍵・known_hosts を確認してください）" >&2
 fi
 exec /usr/sbin/sshd -D -e -h "$HOSTKEYS/ssh_host_ed25519_key"

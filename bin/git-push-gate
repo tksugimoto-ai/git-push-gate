@@ -23,7 +23,9 @@ flock -w 300 9 || { echo "git-push-gate: ほかの push が終わらないため
 
 # GitHub の最新状態を反映してから受け付ける。
 # これでクライアント側の fast-forward 判定と、pre-receive の lease が GitHub と一致する。
-timeout 120 git --git-dir="$REPO" fetch --prune --quiet upstream '+refs/heads/*:refs/heads/*'
+# 一度も fetch できていなければ（起動時の fetch の失敗など）、全履歴を取るので時間制限を長くする
+if [ -n "$(git --git-dir="$REPO" for-each-ref --count=1 refs/heads/)" ]; then limit=120; else limit=1800; fi
+timeout "$limit" git --git-dir="$REPO" fetch --prune --no-tags --quiet upstream '+refs/heads/*:refs/heads/*'
 
 # 止まったクライアントがロックを持ち続けないよう、受け付けの時間に上限を付ける。
 # 上限で止まるのは receive-pack だけで、GitHub への push（pre-receive の中、別に 300 秒の上限）は
