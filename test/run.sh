@@ -126,16 +126,16 @@ if gh_has multi; then fail=$((fail+1)); echo "FAIL 拒否された push の一�
 # 人間が push したワークフローの上に、エージェントがコミットを積む
 human hw main "printf 'on: pull_request\n' > .github/workflows/ci.yml"
 git switch -qC hw origin/hw; echo c > c; git add c; git commit -qm c
-expect ok "人間が変更したワークフローの上に積んだコミット" origin hw
+expect ng "人間が変更したワークフローのブランチへの push（人間がワークフローを試すブランチを守る）" origin hw
 git rebase -q --onto origin/hw HEAD~1; git commit -q --allow-empty -m e
-expect ok "人間が変更したワークフローの上での強制 push" --force origin hw
+expect ng "人間が変更したワークフローのブランチへの強制 push" --force origin hw
 printf 'on: [push]\n' > .github/workflows/ci.yml; git commit -qam hw2
 expect ng "人間が変更したワークフローの書き換え" origin hw
 git reset -q --hard origin/hw
 expect ng "人間が変更したワークフローを別のブランチへ" origin hw:refs/heads/hw-copy
 human ha main "echo z >> .github/actions/a/action.yml"
 git switch -qC ha origin/ha; echo c > c; git add c; git commit -qm c
-expect ok "人間が変更した .github/actions の上に積んだコミット" origin ha
+expect ng "人間が変更した .github/actions のブランチへの push" origin ha
 # 名前を間違えた保護ブランチ
 git --git-dir="$T/gate.git" config gate.protected "main develop nosuch"
 git switch -qC typo origin/main; echo t > t; git add t; git commit -qm typo
@@ -181,7 +181,7 @@ git switch -qC dvok origin/develop; echo d > d; git add d; git commit -qm dvok
 expect ok "develop の内容そのままのコミット" origin dvok
 # 2 回に分ければ混ぜられる（develop の内容のブランチに、main の .github/actions を載せる）。README の限界に記載
 git checkout -q origin/main -- .github/actions; git commit -qm mix2
-expect ok "2 回に分けて main と develop の版を混ぜる（既知の限界）" origin dvok
+expect ng "2 回に分けて main と develop の版を混ぜる" origin dvok
 # 人間が main と develop のワークフローを直した後、古い版を持つ既存のブランチ
 git switch -qC stale origin/main; echo s > s; git add s; git commit -qm stale
 expect ok "古い版になる前のブランチの作成" origin stale
@@ -191,7 +191,7 @@ git fetch -q
 echo s2 >> s; git commit -qam stale2
 # 既存のブランチは、今の内容（古い版）のまま積める。取り消しは人間が行う（README）。
 # push で動くワークフローはブランチ側の版、pull_request で動くものはマージコミット（main の版）が使われる
-expect ok "人間が main を直した後の、古い版を持つ既存のブランチへの push" origin stale
+expect ng "人間が main を直した後の、古い版を持つ既存のブランチへの push" origin stale
 old_stale=$(git rev-parse HEAD)
 git rebase -q origin/main
 expect ok "main に rebase した後の push" --force origin stale
@@ -221,7 +221,9 @@ if command -v ssh-agent >/dev/null; then
   kill "$SSH_AGENT_PID"
 fi
 
-if grep -q ' refs/heads/feat ' "$T/gate.git/push-gate.log" && ! grep -q 'refs/heads/main' "$T/gate.git/push-gate.log"
-then pass=$((pass+1)); echo "ok   受け付けた更新だけを記録"; else fail=$((fail+1)); echo "FAIL 受け付けた更新だけを記録"; cat "$T/gate.git/push-gate.log" 2>&1 | sed 's/^/     /'; fi
+L="$T/gate.git/push-gate.log"
+if grep -v ' REJECTED ' "$L" | grep -q ' refs/heads/feat ' && ! grep -v ' REJECTED ' "$L" | grep -q 'refs/heads/main' \
+   && grep ' REJECTED ' "$L" | grep -q 'refs/heads/main への push は禁止'
+then pass=$((pass+1)); echo "ok   受け付けた更新と拒否を記録"; else fail=$((fail+1)); echo "FAIL 受け付けた更新と拒否を記録"; sed 's/^/     /' "$L"; fi
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

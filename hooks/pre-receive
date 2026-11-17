@@ -3,7 +3,11 @@
 # GitHub 側で失敗したらこのフックも失敗するので、クライアントの push もエラーになる。
 set -euf   # -f: 保護ブランチ名をグロブ展開しない
 zero=0000000000000000000000000000000000000000
-die() { echo "git-push-gate: $*" >&2; exit 1; }
+# 拒否も記録する（人間がいちばん知りたいのは、main やワークフローを変えようとした試み）
+die() {
+  printf '%s REJECTED %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$(git rev-parse --git-dir)/push-gate.log" 2>/dev/null || true
+  echo "git-push-gate: $*" >&2; exit 1
+}
 # ブランチは名前どおりに引く（rev-parse はないと refs/tags/... などに読み替えるので使わない）
 tip() { git show-ref --verify --hash "$1" 2>/dev/null || true; }
 # 保護ブランチなどは entrypoint がリポジトリの設定に書き込む（sshd 経由では環境変数が届かないため）
@@ -31,13 +35,11 @@ esac
 default_tip=$(tip "refs/heads/$default")
 
 # ワークフローと複合アクションは、エージェントには変更させない（人間が push する）。
-# 中身は解析しない。解析すると、GitHub のパーサーとの解釈の違いや、PR のマージコミットで組み合わされた
-# 内容（検査されない）を突かれるため。許すのは、次の「基準」に収まる内容だけ:
-#   保護ブランチのどれか 1 つの内容 ＋ push 先のブランチの GitHub 上の今の内容
-# push 先の今の内容は、人間が push したものか、ゲートを通った（＝その時の基準に収まった）ものだけ。
-# これで、人間が push したワークフローの上にエージェントがコミットを積め、main に rebase もできる。
-# 複数の保護ブランチの版を 1 つのコミットで混ぜることはさせない。
-# 履歴（親や分岐点）は使わない。エージェントが自由に作れるため
+# 許すのは、保護ブランチのどれか 1 つと同じ内容だけ（ワークフローのファイルを消すのは可）。
+# 中身は解析しない（GitHub のパーサーとの解釈の違いや、PR のマージコミットで組み合わされた内容を
+# 突かれるため）。履歴（親や分岐点）も使わない（エージェントが自由に作れるため）。
+# push 先の今の内容も基準にしない。人間が試しているワークフロー（保護していないブランチ）や、
+# 人間が直す前の古い版の上に、エージェントのコードを載せて動かせてしまうため
 WF=.github/workflows
 # git の失敗を「項目なし」と取り違えないよう、どれも失敗したら拒否する（tree_ok などは if や || の中で
 # 呼ばれ、set -e が効かないため、明示的に確かめる）
@@ -61,21 +63,18 @@ subset() { # subset 行の一覧 許す行の一覧: 前者のすべての行が
     printf '%s\n' "$2" | grep -Fqx -- "$line" || exit 1
   done
 }
-check_commit() { # check_commit ref new 今の値（なければ空）
+check_commit() { # check_commit ref new
   # ブランチにはコミットだけを置かせる（注釈付きタグのオブジェクトなども ls-tree は中を見てしまう）
   [ "$(git cat-file -t "$2" 2>/dev/null || true)" = commit ] || die "$1: コミット以外は push できません"
   tree_ok "$2" || die "$1: .github か .github/workflows がディレクトリではありません"
   case_ok "$2" || die "$1: 大文字・小文字だけが違う .github / workflows / actions は使えません"
   files=$(workflows "$2"); actions=$(entry "$2" .github/actions)
-  cur_files=""; cur_actions=none
-  if [ -n "$3" ] && tree_ok "$3"; then cur_files=$(workflows "$3"); cur_actions=$(entry "$3" .github/actions); fi
   for b in $PROTECTED; do
     c=$(tip "refs/heads/$b"); tree_ok "$c" || continue
-    base_files=$(workflows "$c"); base_actions=$(entry "$c" .github/actions)
-    [ "$actions" = "$base_actions" ] || [ "$actions" = "$cur_actions" ] || continue
-    if subset "$files" "$(printf '%s\n%s\n' "$base_files" "$cur_files")"; then return 0; fi
+    [ "$actions" = "$(entry "$c" .github/actions)" ] || continue
+    if subset "$files" "$(workflows "$c")"; then return 0; fi
   done
-  die "$1: .github/workflows か .github/actions を変更しているため拒否（保護ブランチの 1 つと、このブランチの今の内容に収まらない）。人間が push してください"
+  die "$1: .github/workflows か .github/actions が、どの保護ブランチとも一致しないため拒否。main に rebase するか、人間が push してください"
 }
 
 set --; log=""
@@ -117,7 +116,7 @@ while IFS= read -r line; do
   if [ "$new" = "$zero" ]; then
     spec=":$ref"                       # ブランチ削除
   else
-    check_commit "$ref" "$new" "$expect"
+    check_commit "$ref" "$new"
     spec="$new:$ref"
   fi
   set -- "$@" "--force-with-lease=$ref:$expect" "$spec"
@@ -126,7 +125,10 @@ while IFS= read -r line; do
 done
 
 [ $# -eq 0 ] && exit 0
-timeout 300 git push --atomic --quiet upstream "$@"
+timeout 300 git push --atomic --quiet upstream "$@" \
+  || die "GitHub への push に失敗しました（時間切れを含む。時間切れのときは GitHub に反映されていることがあるので、fetch して確かめてください）"
 # 受け付けた更新の記録（人間が後で確かめられるように）。GitHub への push が成功したものだけ
 # （書き込みに失敗しても、GitHub には push 済みなので、クライアントには成功を返す）
 printf '%s' "$log" >> "$(git rev-parse --git-dir)/push-gate.log" || echo "git-push-gate: 警告: 記録を書き込めませんでした" >&2
+# ロックを持ったまま整理する（fetch と receive-pack では gc を止めているため）。失敗しても push は成功として返す
+git -c gc.autoDetach=false gc --auto --quiet || echo "git-push-gate: 警告: gc に失敗しました" >&2

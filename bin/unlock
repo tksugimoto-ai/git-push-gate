@@ -7,6 +7,13 @@ if [ -z "$SOCK" ]; then
   echo "unlock: パスフレーズなしの鍵なので、解除は不要です"
   exit 0
 fi
+# ssh-agent が止まっていたら（ssh-add -l が 2 = 接続できない）、起動し直す
+rc=0; su -s /bin/sh git -c "SSH_AUTH_SOCK=$SOCK ssh-add -l" >/dev/null 2>&1 || rc=$?
+if [ "$rc" = 2 ]; then
+  echo "unlock: ssh-agent が止まっていたので、起動し直します" >&2
+  rm -f "$SOCK"
+  su -s /bin/sh git -c "ssh-agent -a $SOCK" >/dev/null
+fi
 # UNLOCK_LIFETIME（例: 8h）を指定すると、その時間で自動的に再ロックされる
 su -s /bin/sh git -c "SSH_AUTH_SOCK=$SOCK ssh-add ${UNLOCK_LIFETIME:+-t $UNLOCK_LIFETIME} /home/git/.ssh/github_key"
 # 最初の fetch（全履歴）は時間がかかるので、push の前に時間制限なしで済ませておく
