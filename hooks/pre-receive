@@ -25,14 +25,22 @@ hex40() { printf '%s' "$1" | grep -Eqx '[0-9a-f]{40}'; }
 for b in $PROTECTED; do
   [ -n "$(tip "refs/heads/$b")" ] || die "保護ブランチ $b が GitHub にありません。PROTECTED_BRANCHES を確認してください"
 done
+# GitHub の今の状態を、判定の直前にもう一度確かめる。push を始めてからデータを送り終えるまで（最大 10 分）の間に
+# 人間が保護ブランチのワークフローを直していたら、受け付けの前の fetch の値で判定することになるため
+# shellcheck disable=SC2046
+remote=$(timeout 60 git ls-remote --symref upstream HEAD $(for b in $PROTECTED; do printf 'refs/heads/%s ' "$b"; done)) \
+  || die "GitHub の状態を確かめられません"
+for b in $PROTECTED; do
+  [ "$(printf '%s\n' "$remote" | awk -v r="refs/heads/$b" '$1 != "ref:" && $2 == r { print $1 }')" = "$(tip "refs/heads/$b")" ] \
+    || die "保護ブランチ $b が、受け付けを始めた後に GitHub で更新されました。やり直してください"
+done
 # デフォルトブランチ（master や trunk のこともある）が保護されていなければ受け付けない
-default=$(timeout 60 git ls-remote --symref upstream HEAD | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2 }')
+default=$(printf '%s\n' "$remote" | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2 }')
 [ -n "$default" ] || die "GitHub のデフォルトブランチを確かめられません"
 case " $PROTECTED " in
   *" $default "*) ;;
   *) die "デフォルトブランチ ${default:-（不明）} が PROTECTED_BRANCHES に入っていません" ;;
 esac
-default_tip=$(tip "refs/heads/$default")
 
 # ワークフローと複合アクションは、エージェントには変更させない（人間が push する）。
 # 許すのは、保護ブランチのどれか 1 つと同じ内容だけ（ワークフローのファイルを消すのは可）。
@@ -79,6 +87,8 @@ check_commit() { # check_commit ref new
 
 set --; log=""
 while IFS= read -r line; do
+  # 制御文字（端末の制御シーケンスなど）を含む行は、記録やメッセージに名前を出さずに拒否する
+  if printf '%s' "$line" | LC_ALL=C grep -q '[[:cntrl:]]'; then die "不正な更新の指定です（制御文字を含む）"; fi
   # 行をそのまま読み、「old new ref」の形でなければ拒否する（read で区切ると、末尾の空白などが取り除かれ、
   # receive-pack が後で拒否する名前を、整えた名前で GitHub に push してしまう）
   old=${line%% *}; rest=${line#* }; new=${rest%% *}; ref=${rest#* }
@@ -130,5 +140,3 @@ timeout 300 git push --atomic --quiet upstream "$@" \
 # 受け付けた更新の記録（人間が後で確かめられるように）。GitHub への push が成功したものだけ
 # （書き込みに失敗しても、GitHub には push 済みなので、クライアントには成功を返す）
 printf '%s' "$log" >> "$(git rev-parse --git-dir)/push-gate.log" || echo "git-push-gate: 警告: 記録を書き込めませんでした" >&2
-# ロックを持ったまま整理する（fetch と receive-pack では gc を止めているため）。失敗しても push は成功として返す
-git -c gc.autoDetach=false gc --auto --quiet || echo "git-push-gate: 警告: gc に失敗しました" >&2

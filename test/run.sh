@@ -80,7 +80,7 @@ git commit -q --amend -m b2
 expect ok "強制 push" --force origin feat
 expect ok "feature ブランチの削除" origin :feat
 
-# ワークフローは保護ブランチ（または push 先の今の内容）と同一のものだけ。中身は見ない
+# ワークフローは保護ブランチのどれか 1 つと同一のものだけ（消すのは可）。中身は見ない
 wf w1 "on: pull_request";                                          expect ng "ワークフローの変更" origin w1
 git switch -qC w2 origin/main; echo 'on: push' > .github/workflows/new.yml; git add -A; git commit -qm w2
 expect ng "ワークフローの追加" origin w2
@@ -123,7 +123,7 @@ git --git-dir="$T/gate.git" config receive.fsckObjects true
 git switch -qC multi origin/main; echo m > m; git add m; git commit -qm multi
 expect ng "正常な ref と main を同時に push" origin multi HEAD:main
 if gh_has multi; then fail=$((fail+1)); echo "FAIL 拒否された push の一部が GitHub に届いた"; else pass=$((pass+1)); echo "ok   拒否された push は一部も GitHub に届かない"; fi
-# 人間が push したワークフローの上に、エージェントがコミットを積む
+# 人間がワークフローを変えたブランチには、エージェントは push できない（人間がワークフローを試すブランチを守る）
 human hw main "printf 'on: pull_request\n' > .github/workflows/ci.yml"
 git switch -qC hw origin/hw; echo c > c; git add c; git commit -qm c
 expect ng "人間が変更したワークフローのブランチへの push（人間がワークフローを試すブランチを守る）" origin hw
@@ -179,7 +179,7 @@ git switch -qC mix origin/main; git checkout -q origin/develop -- .github/workfl
 expect ng "main と develop の版を混ぜたコミット" origin mix
 git switch -qC dvok origin/develop; echo d > d; git add d; git commit -qm dvok
 expect ok "develop の内容そのままのコミット" origin dvok
-# 2 回に分ければ混ぜられる（develop の内容のブランチに、main の .github/actions を載せる）。README の限界に記載
+# 2 回に分けても混ぜられない（develop の内容のブランチに、main の .github/actions を載せる）
 git checkout -q origin/main -- .github/actions; git commit -qm mix2
 expect ng "2 回に分けて main と develop の版を混ぜる" origin dvok
 # 人間が main と develop のワークフローを直した後、古い版を持つ既存のブランチ
@@ -189,17 +189,33 @@ expect ok "古い版になる前のブランチの作成" origin stale
   && printf 'on: push\n# fixed\n' > .github/workflows/ci.yml && git commit -qam "fix $b" && git push -q origin "HEAD:$b"; done )
 git fetch -q
 echo s2 >> s; git commit -qam stale2
-# 既存のブランチは、今の内容（古い版）のまま積める。取り消しは人間が行う（README）。
-# push で動くワークフローはブランチ側の版、pull_request で動くものはマージコミット（main の版）が使われる
+# 古い版を持つ既存のブランチにも push できない（main に rebase すれば通る）
 expect ng "人間が main を直した後の、古い版を持つ既存のブランチへの push" origin stale
 old_stale=$(git rev-parse HEAD)
 git rebase -q origin/main
 expect ok "main に rebase した後の push" --force origin stale
-# 古い版を、まだ GitHub にないブランチに写すのは拒否
+# 古い版を新しいブランチに写すのも拒否
 expect ng "古い版を持つ新しいブランチ" origin "$old_stale:refs/heads/stale-copy"
 # ブランチにはコミットだけ（注釈付きタグのオブジェクトは拒否）
 git tag -a -m t tobj origin/main
 expect ng "注釈付きタグのオブジェクトをブランチに" origin "$(git rev-parse tobj):refs/heads/tagobj"
+# 受け付けを始めた後に、GitHub の保護ブランチが更新された（push の途中で止めて、古い状態で判定させる手口）
+git switch -qC race origin/main; echo r > r; git add r; git commit -qm race
+( cd "$T/seed" && git fetch -q && git switch -qC fix2 origin/main && echo '# fix2' >> .github/workflows/ci.yml \
+  && git commit -qam fix2 && git push -q origin HEAD:main )   # ゲートはまだ fetch していない
+if printf '%s %s refs/heads/race\n' 0000000000000000000000000000000000000000 "$(git rev-parse race)" \
+   | (cd "$T/gate.git" && GIT_DIR=. sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 || ! grep -q '受け付けを始めた後に GitHub で更新' "$T/out" || gh_has race
+then fail=$((fail+1)); echo "FAIL 受け付けの途中で保護ブランチが更新されたら拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   受け付けの途中で保護ブランチが更新されたら拒否"; fi
+git fetch -q; git --git-dir="$T/gate.git" fetch -q --prune upstream '+refs/heads/*:refs/heads/*'
+# 制御文字を含む行（記録に端末の制御シーケンスを書き込ませない）
+if printf '%s %s refs/heads/x\033[2Kx\n' 0000000000000000000000000000000000000000 "$(git rev-parse origin/main)" \
+   | (cd "$T/gate.git" && GIT_DIR=. sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 || ! grep -q '制御文字' "$T/out" \
+   || LC_ALL=C grep -q "$(printf '\033')" "$T/gate.git/push-gate.log"
+then fail=$((fail+1)); echo "FAIL 制御文字を含む行は、記録に書かずに拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   制御文字を含む行は、記録に書かずに拒否"; fi
+# push 以外のコマンドも記録する
+SSH_ORIGINAL_COMMAND="$(printf 'ls \033[2K')" GIT_PUSH_GATE_REPO="$T/gate.git" sh "$ROOT/bin/git-push-gate" >/dev/null 2>&1 || true
+if grep -q 'REJECTED 許可されていないコマンド' "$T/gate.git/push-gate.log" && ! LC_ALL=C grep -q "$(printf '\033')" "$T/gate.git/push-gate.log"
+then pass=$((pass+1)); echo "ok   push 以外のコマンドを、中身を書かずに記録"; else fail=$((fail+1)); echo "FAIL push 以外のコマンドを、中身を書かずに記録"; fi
 # 許可する接頭辞
 git --git-dir="$T/gate.git" config gate.allowedPrefixes "agent/ claude/"
 git switch -qC pfx origin/main; echo p > p; git add p; git commit -qm pfx

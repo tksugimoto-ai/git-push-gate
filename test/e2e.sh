@@ -87,6 +87,8 @@ check "feature ブランチの push が GitHub に届く" \
   'client "git switch -qc feat && $(commit a) && git push -q origin feat" && gh_has feat'
 check "main への push は拒否" \
   '! client "$(commit b) && git push -q origin HEAD:main" && grep -q git-push-gate: "$T/out"'
+check "ワークフローの変更は拒否" \
+  '! client "echo \"# x\" >> .github/workflows/ci.yml && git commit -qam wf && git push -q origin HEAD:refs/heads/wf" && grep -q git-push-gate: "$T/out" && ! gh_has wf'
 check "任意のコマンドは拒否" \
   '! run "$GSSH git@gate cat /etc/passwd" >"$T/out" 2>&1 && grep -q 許可されていません "$T/out" && ! grep -q root: "$T/out"'
 check "ゲートからの clone（upload-pack）は拒否" \
