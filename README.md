@@ -138,7 +138,7 @@ docker compose exec git-push-gate unlock
 
 ### 3. devcontainer 側の push 先を設定する
 
-devcontainer の中で [client/setup.sh](client/setup.sh)（コメントを除いて 40 行ほど）を実行します。ホストで実行するスクリプトはありません。setup.sh は次のことをします。書き込むのは `~/.ssh` と `.git/config` だけで、利用側のリポジトリにコミットされるものはありません。
+devcontainer の中で [client/setup.sh](client/setup.sh)（コメントを除いて 50 行足らず）を実行します。ホストで実行するスクリプトはありません。setup.sh は次のことをします。書き込むのは `~/.ssh` と `.git/config` だけで、利用側のリポジトリにコミットされるものはありません。
 
 - クライアント用の鍵を devcontainer の中で作る（秘密鍵は外に出さない。すでにあれば作り直さない）
 - ゲートのホスト鍵を `~/.ssh/git-push-gate_known_hosts` に書き、`~/.ssh/config` に `Host git-push-gate` を足す（SSH エージェントは使わない設定）
@@ -216,6 +216,7 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 - ゲートの設定ディレクトリ（`~/.config/git-push-gate` など）をマウントしない
 - **devcontainer の定義とワークスペースの `.git` は、エージェントが書き換えられる**ことに注意する
   - `.devcontainer/devcontainer.json` や compose のファイルに、マウント（docker.sock やゲートの設定ディレクトリ）や `initializeCommand`（ホストで動く）を足されると、人間がリビルドしたときに効いてしまう。リビルドの前に差分を確かめる
+  - `postCreateCommand` などのライフサイクルのコマンドと、そこから呼ばれるもの（`.devcontainer/*.sh`、`npm install` のスクリプト、Makefile など）は、リビルドのたびに、下の「確かめ方」より前に devcontainer の中で動く。`~/.bashrc` にエイリアスを仕込んで確かめ方の結果を偽ることもできるので、これもリビルドの前に差分を確かめる
   - ワークスペースの `.vscode/settings.json` は、上の VS Code のユーザー設定（`git.terminalAuthentication` など）を打ち消したり、統合ターミナルの環境変数を変えたりできる（推測。確かめてはいない）。ワークスペースを開く前と、下の「確かめ方」の前に差分を確かめる
   - ワークスペースの `.git/config`（`core.fsmonitor`、`core.sshCommand` など）や `.git/hooks` は、ホストでそのディレクトリの git を使うと、ホストで実行される。ホストでは、そのワークスペースで git を使わない（別に clone したものを使う）
 - エージェントに渡す GitHub トークン（PR 作成用など）は、対象のリポジトリだけに絞った fine-grained PAT にする
@@ -226,7 +227,13 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 
 ### 確かめ方
 
-devcontainer を作ったら（リビルドのたびに）、**setup.sh より前に、エージェントを動かす前に**、人間が devcontainer の中で次を実行してください。ゲートを通らずに GitHub に書き込める経路がないかの確認です（エージェントが動いた後は、エージェントが結果を変えられる。ワークスペースの `.git` も、前のセッションでエージェントが書き換えられる）。VS Code の統合ターミナルで実行してください（`GIT_ASKPASS` が設定されるのはそこだけです）。`OWNER/REPO` は対象のリポジトリに置き換えます。
+devcontainer を作ったら（リビルドのたびに）、**setup.sh より前に、エージェントを動かす前に**、人間が devcontainer の中で次を実行してください。`OWNER/REPO` は対象のリポジトリに置き換えます。
+
+これは、人間の設定ミス（VS Code の設定、SSH エージェントの転送、トークンの権限など）を見つけるための**目安**です。エージェントが手を入れられる環境の中で行う確認なので、エージェントがその気になれば結果を偽れます（ワークスペースの `.git` や、上のライフサイクルのコマンドで動くスクリプトは、前のセッションでエージェントが書き換えられる。devcontainer で sudo が使えるなら、コマンドそのものも差し替えられる）。ゲートを迂回させない本当の守りは、ゲートと、トークンの権限と、上の設定の側にあります。
+
+- VS Code の統合ターミナルで実行してください（`GIT_ASKPASS` が設定されるのはそこだけです）
+- エイリアスや関数の影響を受けないよう、先に設定ファイルを読まないシェルを起動してから実行します（`bash --noprofile --norc`。zsh なら `zsh -f`）
+- 結果に書いた「No such file」は、zsh では「no matches found」になることがあります
 
 1. Docker を操作できない。どれも「No such file」で、`DOCKER_HOST=` は空
 
@@ -252,16 +259,21 @@ devcontainer を作ったら（リビルドのたびに）、**setup.sh より�
    ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new git@github.com
    ```
 
-5. git に認証や接続先を差し替える設定がない。ワークスペースのディレクトリで実行し（ワークスペースの `.git/config` も見るため）、何も出ないこと（エージェント用の読み取り専用のトークンを `gh auth setup-git` で設定したなら、その `credential` の行だけ）
+5. git に認証や接続先を差し替える設定がない。ホームディレクトリとワークスペースのディレクトリで 1 回ずつ実行します（ワークスペースの `.git/config` も見るため）。
+   - `--no-pager` は、ワークスペースの設定にあるページャーで出力を絞られないようにするためのもの
+   - ワークスペースでは、最初の `git rev-parse` が `.git` を表示すること（エラーなら、持ち主の違いなどでワークスペースの設定を読めていないので、確かめたことにならない）
+   - 何も出ないこと。ただし、エージェント用の読み取り専用のトークンを `gh auth setup-git` で設定したならその `credential` の行は出てよく、`remote.*.url` の行は、URL に `ユーザー名:トークン@` が入っていなければよい
 
    ```sh
-   git config --show-origin --get-regexp 'credential|insteadof|extraheader|askpass|sshcommand|proxy|pushurl|hookspath'
+   cd ~ && git --no-pager config --show-origin --get-regexp 'credential|insteadof|extraheader|askpass|sshcommand|proxy|pushurl|hookspath'
+   cd <ワークスペース> && git rev-parse --git-dir &&
+     git --no-pager config --show-origin --get-regexp 'credential|insteadof|extraheader|askpass|sshcommand|proxy|pushurl|hookspath|^remote\..*\.url'
    ```
 
 6. 環境変数にトークンや認証の仕組みがない。エージェント用の読み取り専用のトークン以外は出ないこと（`GIT_ASKPASS` が出たら VS Code の設定を見直す）
 
    ```sh
-   env | grep -iE 'token|askpass|ssh_auth|git_ssh|_pat|passw|secret|credential'
+   env | grep -iE 'token|askpass|ssh_auth|git_ssh|(^|_)pat(_|=)|passw|secret|credential'
    ```
 
 7. HTTPS で push できない。ワークスペースの外に作った空のリポジトリから試し、「could not read Username」か 403 などの認証のエラーで失敗すること（成功したら GitHub に `bypass-test` ができるので消し、設定を見直す）。「Author identity unknown」などで push の前に止まったら、確かめたことにならない
@@ -272,11 +284,15 @@ devcontainer を作ったら（リビルドのたびに）、**setup.sh より�
      GIT_TERMINAL_PROMPT=0 git push https://github.com/OWNER/REPO.git HEAD:refs/heads/bypass-test; cd -
    ```
 
-8. エージェントのトークン（ここでは `$GH_TOKEN`）で書き込みの API を呼べない。`403` になること。`401` はトークンが空か無効、`404` は OWNER/REPO の間違いか、トークンがそのリポジトリを対象にしていないので、どちらも確かめたことにならない。それ以外（`201` や `422`）なら Contents: write があるので、トークンを作り直す（`201` ならできた `bypass-test` も消す）
+8. エージェントのトークンで、書き込みの API を呼べない。エージェントが `gh` を使うなら、まず `gh auth status` で、使われているのが fine-grained PAT（`github_pat_…`）であることを確かめ、トークンは `gh auth token` で取ります（使っていなければ、エージェントに渡したトークンを `GH_TOKEN` に入れる）。
+   - 状態コードが `403` で、本文が GitHub のメッセージ「Resource not accessible by personal access token」であること。プロキシなど、GitHub 以外が返した 403 では確かめたことにならない
+   - `401` はトークンが空か無効、`404` は OWNER/REPO の間違いか、トークンがそのリポジトリを対象にしていないので、どちらも確かめたことにならない
+   - それ以外（`201` や `422`）なら Contents: write があるので、トークンを作り直す（`201` ならできた `bypass-test` も消す）
 
    ```sh
-   curl --silent --show-error --output /dev/null --write-out '%{http_code}\n' --request POST \
-     --header "Authorization: Bearer $GH_TOKEN" \
+   token=$(gh auth token 2>/dev/null || printf '%s' "$GH_TOKEN")
+   curl --silent --show-error --write-out '\n%{http_code}\n' --request POST \
+     --header "Authorization: Bearer $token" --header 'Content-Type: application/json' \
      --data '{"ref":"refs/heads/bypass-test","sha":"<main のコミットの SHA>"}' \
      https://api.github.com/repos/OWNER/REPO/git/refs
    ```

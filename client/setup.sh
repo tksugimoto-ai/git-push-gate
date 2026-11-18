@@ -6,7 +6,7 @@
 #   例: sh setup.sh host.docker.internal 2222 'ssh-ed25519 AAAA...'
 #
 # クライアント用の鍵は devcontainer の中で作り、秘密鍵は外に出さない。表示される公開鍵を、
-# 人間がゲートの config/client_keys.pub に足して、ゲートを再起動する。
+# 人間がゲートの /config にマウントしたディレクトリの client_keys.pub に足して、ゲートを再起動する。
 # 書き込むのは ~/.ssh と .git/config だけで、利用側のリポジトリにコミットされるものはない。
 set -eu
 # オプションはなるべく長い形で書く（短い形のままのものは、busybox や OpenSSH に長い形がないもの）
@@ -61,5 +61,5 @@ fi
 git remote set-url --push "$remote_name" ssh://git@git-push-gate/repo.git
 
 echo "push 先を git-push-gate（$gate_host:$gate_port）にしました。"
-echo "まだなら、次の 1 行（公開鍵）を、ホストでエディタを使ってゲートの config/client_keys.pub に足し、ゲートを再起動してください:"
+echo "まだなら、次の 1 行（公開鍵）を、ホストでエディタを使って、ゲートの /config にマウントしたディレクトリの client_keys.pub に足し、ゲートを再起動してください:"
 cat ~/.ssh/git-push-gate.pub
