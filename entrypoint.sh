@@ -76,6 +76,8 @@ set -- $PREFIXES; PREFIXES="$*"; set --
 if [ -n "$PREFIXES" ]; then g config gate.allowedPrefixes "$PREFIXES"; else g config --unset gate.allowedPrefixes || true; fi
 # 壊れたオブジェクト（同じ名前の項目が 2 つある木など）は受け付けない
 g config receive.fsckObjects true
+# 変な mode（40777 や 100600 など）も拒否する（既定では警告だけで、ls-tree は正規化して表示する）
+g config receive.fsck.badFilemode error
 # bare リポジトリの HEAD が指すブランチ（master など）の削除を receive-pack が拒否すると、
 # GitHub では削除済みなのにクライアントには失敗と返るので、拒否させない（保護は pre-receive が行う）
 g config receive.denyDeleteCurrent ignore

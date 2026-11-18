@@ -2,6 +2,9 @@
 # 受け取った更新を検査し、通ったものだけを GitHub に同期 push する。
 # GitHub 側で失敗したらこのフックも失敗するので、クライアントの push もエラーになる。
 set -euf   # -f: 保護ブランチ名をグロブ展開しない
+# 受け付けの時間切れなどでプロセスグループごとシグナルを受けても、フックは最後まで動いて結果を記録する
+# （'' で無視すると子プロセスにも引き継がれ、timeout で止められなくなるので、何もしないハンドラーにする）
+trap : TERM HUP PIPE
 zero=0000000000000000000000000000000000000000
 # 拒否も記録する（人間がいちばん知りたいのは、main やワークフローを変えようとした試み）
 # 記録でボリュームを埋められないよう、10MB を超えたら拒否は書かない（受け付けた更新は書く）
@@ -24,31 +27,14 @@ set -- $PROTECTED
 # 下の .github の比較は、木が正しい形（項目が並んでいて重複がない）であることを前提にしている。
 # 並びの壊れた木では ls-tree に .github が見えず、比較をすり抜けるので、fsck が無効なら受け付けない
 [ "$(git config --bool --get receive.fsckObjects || true)" = true ] || die "receive.fsckObjects が有効ではありません"
+# 変な mode（40777 や 100600 など）は ls-tree が正規化して表示し、比較では同じに見えるので、fsck で拒否させる
+[ "$(git config --get receive.fsck.badFilemode || true)" = error ] || die "receive.fsck.badFilemode が error ではありません"
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 hex40() { printf '%s' "$1" | grep -Eqx '[0-9a-f]{40}'; }
 # 名前を間違えた保護ブランチは何も守らないので、GitHub にない保護ブランチがあれば受け付けない（直前に fetch 済み）
 for b in $PROTECTED; do
   [ -n "$(tip "refs/heads/$b")" ] || die "保護ブランチ $b が GitHub にありません。PROTECTED_BRANCHES を確認してください"
 done
-# GitHub の今の状態を、判定の直前にもう一度確かめる。push を始めてからデータを送り終えるまで（最大 10 分）の間に
-# 人間が保護ブランチのワークフローを直していたら、受け付けの前の fetch の値で判定することになるため。
-# タグも取る（ゲートはタグを fetch しないので、同じ名前のブランチを作らせないために使う）
-# GitHub に push する直前にもう一度取り、変わっていないことを確かめる（下記）
-# shellcheck disable=SC2046
-snapshot() { timeout 60 git ls-remote --symref upstream HEAD 'refs/tags/*' $(for b in $PROTECTED; do printf 'refs/heads/%s ' "$b"; done); }
-remote=$(snapshot) || die "GitHub の状態を確かめられません"
-for b in $PROTECTED; do
-  [ "$(printf '%s\n' "$remote" | awk -v r="refs/heads/$b" '$1 != "ref:" && $2 == r { print $1 }')" = "$(tip "refs/heads/$b")" ] \
-    || die "保護ブランチ $b が、受け付けを始めた後に GitHub で更新されました。やり直してください"
-done
-# デフォルトブランチ（master や trunk のこともある）が保護されていなければ受け付けない
-default=$(printf '%s\n' "$remote" | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2 }')
-[ -n "$default" ] || die "GitHub のデフォルトブランチを確かめられません"
-case " $PROTECTED " in
-  *" $default "*) ;;
-  *) die "デフォルトブランチ ${default:-（不明）} が PROTECTED_BRANCHES に入っていません" ;;
-esac
-
 # ワークフローと複合アクションは、エージェントには変更させない（人間が push する）。
 # 許すのは、保護ブランチのどれか 1 つと同じ内容だけ（ワークフローのファイルを消すのは可）。
 # 中身は解析しない（GitHub のパーサーとの解釈の違いや、PR のマージコミットで組み合わされた内容を
@@ -95,7 +81,7 @@ check_commit() { # check_commit ref new
   die "$1: .github/workflows か .github/actions が、どの保護ブランチとも一致しないため拒否。main に rebase するか、人間が push してください"
 }
 
-set --; log=""; n=0
+set --; log=""; n=0; names=""
 while IFS= read -r line; do
   # 1 回の push の ref の数に上限を付ける（数が多いと判定に時間がかかり、確かめた GitHub の状態が古くなる）
   n=$((n+1)); [ "$n" -le 50 ] || die "一度に push できる ref は 50 個までです。分けて push してください"
@@ -117,22 +103,21 @@ while IFS= read -r line; do
   esac
   git check-ref-format "$ref" || die "$ref は不正なブランチ名です"
   name=${ref#refs/heads/}
+  # 使える文字を限る。$ ` ; | ( ) などを含む名前は、人間が書いたワークフローで
+  # ${{ github.head_ref }} をそのままコマンドに埋め込んでいると、コマンドとして実行されてしまう
+  printf '%s\n' "$name" | grep -Eqx '[A-Za-z0-9._/-]+' || die "$ref は使えない文字を含みます（使えるのは英数字と . _ / -）"
   # 人間やツールが取り違える名前（HEAD、refs/tags/v1 のようにタグや別の ref に見えるもの）は作らせない。
   # 40 桁の 16 進数の名前は、push の指定でコミット ID と取り違えられる（検査したものと別のものが push される）
-  # - や + で始まる名前はオプションや強制 push の指定と、@ は HEAD の別名と取り違えられる
-  if [ "$name" = HEAD ] || [ "$name" = @ ] || [ "${name#refs/}" != "$name" ] || hex40 "$name" \
-     || [ "${name#[-+]}" != "$name" ]; then
-    die "$ref は紛らわしい名前のため拒否"
-  fi
+  # （git はコミット ID の大文字・小文字を区別しないので、大文字も）
+  # - で始まる名前はオプションと取り違えられる。heads/main や tags/v1 は、短い名前で引くとブランチやタグに見える
+  case "$(lower "$name")" in
+    head|refs/*|heads/*|tags/*|remotes/*|pull/*|-*) die "$ref は紛らわしい名前のため拒否" ;;
+  esac
+  ! hex40 "$(lower "$name")" || die "$ref は紛らわしい名前のため拒否"
   # 保護ブランチ（大文字・小文字だけが違う Main なども含む）
   for b in $PROTECTED; do
     [ "$(lower "$name")" != "$(lower "$b")" ] || die "$ref への push は禁止"
   done
-  # GitHub にある同じ名前のタグ（v1.2.3 など）。短い名前で引くツール（git clone --branch、uses: owner/repo@v1 など）が
-  # ブランチの方を取ることがある。削除は紛らわしさをなくすので許す
-  if [ "$new" != "$zero" ] && printf '%s\n' "$remote" | awk -v r="refs/tags/$name" '$1 != "ref:" && ($2 == r || $2 == r "^{}") { f=1 } END { exit !f }'; then
-    die "$ref は GitHub にある同じ名前のタグと紛らわしいため拒否"
-  fi
   # 許可する接頭辞（ALLOWED_BRANCH_PREFIXES）が設定されていれば、それ以外のブランチは作成・更新・削除させない
   if [ -n "$PREFIXES" ]; then
     okp=no
@@ -149,6 +134,7 @@ while IFS= read -r line; do
   else
     check_commit "$ref" "$new"
     spec="$new:$ref"
+    names="$names $name"               # 同じ名前のタグがないかを後で確かめる（削除は紛らわしさをなくすので許す）
   fi
   set -- "$@" "--force-with-lease=$ref:$expect" "$spec"
   log="$log$(date -u +%Y-%m-%dT%H:%M:%SZ) $ref $old $new
@@ -156,10 +142,31 @@ while IFS= read -r line; do
 done
 
 [ $# -eq 0 ] && exit 0
-# 判定に使った GitHub の状態（保護ブランチ・タグ・デフォルトブランチ）が、判定の間に変わっていないことを確かめる。
-# 残る隙間は、この後の GitHub への push の間（最大 5 分）だけ
-now=$(snapshot) || die "GitHub の状態を確かめられません"
-[ "$now" = "$remote" ] || die "保護ブランチかタグが、受け付けを始めた後に GitHub で更新されました。やり直してください"
+# GitHub の今の状態を、push する直前に 1 回だけ確かめる。判定は受け付けの前に fetch した値で行ったので、
+# 保護ブランチがその値のままであることを確かめれば、データを送り終えるまで（最大 10 分）と判定の間に
+# 人間がワークフローを直した場合を、まとめて拒否できる。残る隙間は、この後の GitHub への push の間（最大 5 分）だけ。
+# タグは push するブランチと同じ名前のものだけを問い合わせる（ゲートはタグを fetch しない）
+# shellcheck disable=SC2046,SC2086
+remote=$(timeout 60 git ls-remote --symref upstream HEAD \
+  $(for b in $PROTECTED; do printf 'refs/heads/%s ' "$b"; done) $(for t in $names; do printf 'refs/tags/%s ' "$t"; done)) \
+  || die "GitHub の状態を確かめられません"
+for b in $PROTECTED; do
+  [ "$(printf '%s\n' "$remote" | awk -v r="refs/heads/$b" '$1 != "ref:" && $2 == r { print $1 }')" = "$(tip "refs/heads/$b")" ] \
+    || die "保護ブランチ $b が、受け付けを始めた後に GitHub で更新されました。やり直してください"
+done
+# デフォルトブランチ（master や trunk のこともある）が保護されていなければ受け付けない
+default=$(printf '%s\n' "$remote" | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2 }')
+[ -n "$default" ] || die "GitHub のデフォルトブランチを確かめられません"
+case " $PROTECTED " in
+  *" $default "*) ;;
+  *) die "デフォルトブランチ $default が PROTECTED_BRANCHES に入っていません" ;;
+esac
+# GitHub にある同じ名前のタグ（v1.2.3 など）。短い名前で引くツール（git clone --branch、uses: owner/repo@v1 など）が
+# ブランチの方を取ることがある
+for t in $names; do
+  ! printf '%s\n' "$remote" | awk -v r="refs/tags/$t" '$1 != "ref:" && $2 == r { f=1 } END { exit !f }' \
+    || die "refs/heads/$t は GitHub にある同じ名前のタグと紛らわしいため拒否"
+done
 timeout 300 git push --atomic --quiet upstream "$@" \
   || die "GitHub への push に失敗しました（時間切れを含む。時間切れのときは GitHub に反映されていることがあるので、fetch して確かめてください）"
 # 受け付けた更新の記録（人間が後で確かめられるように）。GitHub への push が成功したものだけ

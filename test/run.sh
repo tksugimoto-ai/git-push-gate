@@ -20,8 +20,9 @@ git clone -q gh.git seed 2>/dev/null
 # ゲート側のリポジトリ（entrypoint.sh 相当）
 git init -q --bare gate.git
 git --git-dir=gate.git config remote.upstream.url "$T/gh.git"
-git --git-dir=gate.git config gate.protected "main develop"   # 以下 3 つは entrypoint.sh が書き込むもの
+git --git-dir=gate.git config gate.protected "main develop"   # 以下 4 つは entrypoint.sh が書き込むもの
 git --git-dir=gate.git config receive.fsckObjects true
+git --git-dir=gate.git config receive.fsck.badFilemode error
 git --git-dir=gate.git config receive.denyDeleteCurrent ignore
 git --git-dir=gate.git config receive.autogc false
 # ローカル転送だと quarantine 用の環境変数が上流に漏れるので外す（SSH 越しの GitHub では不要）
@@ -200,10 +201,10 @@ expect ng "古い版を持つ新しいブランチ" origin "$old_stale:refs/head
 git tag -a -m t tobj origin/main
 expect ng "注釈付きタグのオブジェクトをブランチに" origin "$(git rev-parse tobj):refs/heads/tagobj"
 # 受け付けを始めた後に、GitHub の保護ブランチが更新された（push の途中で止めて、古い状態で判定させる手口）
-git switch -qC race origin/main; echo r > r; git add r; git commit -qm race
+# （フックを直接呼ぶので、ゲートにあるコミットを使う）
 ( cd "$T/seed" && git fetch -q && git switch -qC fix2 origin/main && echo '# fix2' >> .github/workflows/ci.yml \
   && git commit -qam fix2 && git push -q origin HEAD:main )   # ゲートはまだ fetch していない
-if printf '%s %s refs/heads/race\n' 0000000000000000000000000000000000000000 "$(git rev-parse race)" \
+if printf '%s %s refs/heads/race\n' 0000000000000000000000000000000000000000 "$(git rev-parse origin/main)" \
    | (cd "$T/gate.git" && GIT_DIR=. sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 || ! grep -q '受け付けを始めた後に GitHub で更新' "$T/out" || gh_has race
 then fail=$((fail+1)); echo "FAIL 受け付けの途中で保護ブランチが更新されたら拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   受け付けの途中で保護ブランチが更新されたら拒否"; fi
 git fetch -q; git --git-dir="$T/gate.git" fetch -q --prune upstream '+refs/heads/*:refs/heads/*'
@@ -234,6 +235,23 @@ then fail=$((fail+1)); echo "FAIL ASCII 以外の文字を記録に書かない"
 expect ng "軽量タグと同じ名前のブランチ" origin u8:v9
 expect ng "注釈付きタグと同じ名前のブランチ" origin u8:refs/heads/v8
 expect ok "タグと違う名前のブランチ" origin u8:refs/heads/v7
+# 紛らわしい名前・使えない文字
+expect ng "大文字の 40 桁の 16 進数の名前" origin "u8:refs/heads/$(git rev-parse origin/main | tr a-f A-F)"
+expect ng "heads/ で始まる名前" origin u8:refs/heads/heads/main
+expect ng "tags/ で始まる名前（タグ v9 がある）" origin u8:refs/heads/tags/v9
+expect ng "シェルの特殊文字を含む名前" origin 'u8:refs/heads/x$(id)'
+expect ng "; を含む名前" origin 'u8:refs/heads/a;b'
+expect ok "英数字と . _ / - の名前" origin u8:refs/heads/agent/fix-1.2_x
+# 変な mode（中身は main と同じ）
+bt=$(git ls-tree origin/main .github/workflows/ci.yml | awk '{print $3}')
+# mktree は mode を正規化するので、木のオブジェクトを直接作る
+wt=$(python3 -c 'import sys; sys.stdout.buffer.write(b"100600 ci.yml\0" + bytes.fromhex(sys.argv[1]))' "$bt" \
+  | git hash-object -t tree -w --literally --stdin)
+if [ -n "$wt" ] && [ "$(git cat-file tree "$wt" | head -c 6)" = 100600 ]; then
+  gt=$(git ls-tree origin/main:.github | grep -v '	workflows$' | { cat; printf '040000 tree %s\tworkflows\n' "$wt"; } | git mktree)
+  rt=$(git ls-tree origin/main | grep -v '	.github$' | { cat; printf '040000 tree %s\t.github\n' "$gt"; } | git mktree)
+  expect ng "mode 100600 のワークフロー" origin "$(git commit-tree "$rt" -p origin/main -m mode):refs/heads/mode"
+else fail=$((fail+1)); echo "FAIL mode 100600 の木を作れませんでした"; fi
 # 後から同じ名前のタグができたブランチは、更新はできないが、削除はできる
 ( cd "$T/seed" && git tag v7 origin/main && git push -q origin v7 )
 expect ng "タグと同じ名前になったブランチの更新" origin --force origin/main:refs/heads/v7
