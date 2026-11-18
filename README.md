@@ -85,7 +85,7 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 
 ```sh
 gate_dir=~/.config/git-push-gate/REPO
-mkdir --parents "$gate_dir" && cd "$gate_dir"
+mkdir -p "$gate_dir" && cd "$gate_dir"   # macOS の mkdir には --parents がない
 
 # GitHub 用の鍵（この用途専用に作る。パスフレーズは付けても付けなくてもよい）
 ssh-keygen -t ed25519 -C git-push-gate -f github_key
@@ -161,7 +161,7 @@ devcontainer の中で [client/setup.sh](client/setup.sh)（コメントを除�
    sh setup.sh git-push-gate 22 'ssh-ed25519 AAAA... git-push-gate'   # 1. で表示されたホスト鍵
    ```
 
-   秘密の情報を使わないので、AI エージェントに頼んでもかまいません。例: 「client/setup.sh の内容で ~/setup.sh を作り、`sh ~/setup.sh git-push-gate 22 '<ホスト鍵>'` を実行して、表示された公開鍵を教えて」
+   秘密の情報を使わないので、AI エージェントに頼んでもかまいません（その場合も、下の「確かめ方」は先に人間が済ませてください）。例: 「client/setup.sh の内容で ~/setup.sh を作り、`sh ~/setup.sh git-push-gate 22 '<ホスト鍵>'` を実行して、表示された公開鍵を教えて」
 
 3. 表示された公開鍵を、ホストでゲートの `config/client_keys.pub` に足し、ゲートだけを再起動します（`docker compose restart git-push-gate`。パスフレーズ付きの鍵なら、この後もう一度 `unlock`）。
    - **シェルのコマンド（`echo '…' >> client_keys.pub` など）では貼らず、エディタで貼ってください。** エージェントが出した文字列に `'` や `$(…)` が紛れていると、ホストで実行されてしまいます。
@@ -223,19 +223,59 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 
 ### 確かめ方
 
-devcontainer を作ったら（リビルドのたびに）、**エージェントを動かす前に**、devcontainer の中で次を実行してください。ゲートを通らずに GitHub に書き込める経路がないかの確認です（エージェントが動いた後は、エージェントが結果を変えられる）。HTTPS の push は、VS Code の統合ターミナルで実行してください（`GIT_ASKPASS` が設定されるのはそこだけです）。
+devcontainer を作ったら（リビルドのたびに）、**setup.sh より前に、エージェントを動かす前に**、人間が devcontainer の中で次を実行してください。ゲートを通らずに GitHub に書き込める経路がないかの確認です（エージェントが動いた後は、エージェントが結果を変えられる。ワークスペースの `.git` も、前のセッションでエージェントが書き換えられる）。VS Code の統合ターミナルで実行してください（`GIT_ASKPASS` が設定されるのはそこだけです）。`OWNER/REPO` は対象のリポジトリに置き換えます。
 
-| コマンド | 期待する結果 |
-|---|---|
-| `ls /var/run/docker.sock /var/run/docker-host.sock /run/docker.sock; echo "DOCKER_HOST=${DOCKER_HOST:-}"` | `ls` はどれも「No such file」、`DOCKER_HOST=` は空 |
-| `echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-}"; ls /tmp/vscode-ssh-auth-*.sock; ssh-add -l` | 空、「No such file」、「Could not open a connection to your authentication agent」 |
-| `ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new git@github.com` | 「Permission denied (publickey)」（「Host key verification failed」では確かめたことにならない） |
-| `ls ~/.ssh; ls ~/.git-credentials` | `~/.ssh` には `git-push-gate` で始まるファイルと `config`・`known_hosts` だけ、`~/.git-credentials` はない |
-| `git config --show-origin --get-regexp 'credential\.\|url\..*\.insteadof'` | 何も出ない（エージェントの読み取り専用のトークンを `gh auth setup-git` で設定したなら、その helper だけ） |
-| `env \| grep -iE 'token\|askpass\|ssh_auth'` | エージェント用の読み取り専用のトークン以外は出ない（`GIT_ASKPASS` が出たら VS Code の設定を見直す） |
-| `ls ~/.config/git-push-gate` | 「No such file」（ゲートの設定ディレクトリがマウントされていない） |
-| `GIT_TERMINAL_PROMPT=0 git push https://github.com/OWNER/REPO.git HEAD:refs/heads/bypass-test` | 認証のエラーで失敗する（成功したら GitHub に `bypass-test` ができるので消し、設定を見直す） |
-| エージェントのトークン（ここでは `$GH_TOKEN`）で書き込みの API を呼ぶ: `curl --silent --show-error --output /dev/null --write-out '%{http_code}\n' --request POST --header "Authorization: Bearer $GH_TOKEN" --data '{"ref":"refs/heads/bypass-test","sha":"<main の SHA>"}' https://api.github.com/repos/OWNER/REPO/git/refs` | `403`（`201` ならトークンに Contents: write がある。できた `bypass-test` を消し、トークンを作り直す） |
+1. Docker を操作できない。どれも「No such file」で、`DOCKER_HOST=` は空
+
+   ```sh
+   ls /var/run/docker.sock /var/run/docker-host.sock /run/docker.sock; echo "DOCKER_HOST=${DOCKER_HOST:-}"
+   ```
+
+2. SSH エージェントがない。`SSH_AUTH_SOCK=` は空、`ls` は「No such file」、`ssh-add -l` は「Could not open a connection to your authentication agent」
+
+   ```sh
+   echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-}"; ls /tmp/vscode-ssh-auth-*.sock; ssh-add -l
+   ```
+
+3. GitHub に SSH で認証できない。「Permission denied (publickey)」になること（「Host key verification failed」では確かめたことにならない）
+
+   ```sh
+   ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new git@github.com
+   ```
+
+4. 認証情報のファイルがない。どれも「No such file」（`~/.ssh` は、setup.sh の前なので、ないか空。`~/.config/gh` は、エージェント用のトークンを `gh auth login` で設定したならある）
+
+   ```sh
+   ls ~/.ssh ~/.git-credentials ~/.netrc ~/.config/gh ~/.config/git-push-gate
+   ```
+
+5. git に認証や接続先を差し替える設定がない。何も出ないこと（エージェント用の読み取り専用のトークンを `gh auth setup-git` で設定したなら、その `credential` の行だけ）
+
+   ```sh
+   git config --show-origin --get-regexp 'credential|insteadof|extraheader|askpass|sshcommand'
+   ```
+
+6. 環境変数にトークンや認証の仕組みがない。エージェント用の読み取り専用のトークン以外は出ないこと（`GIT_ASKPASS` が出たら VS Code の設定を見直す）
+
+   ```sh
+   env | grep -iE 'token|askpass|ssh_auth'
+   ```
+
+7. HTTPS で push できない。ワークスペースの外に作った空のリポジトリから試し、「could not read Username」か 403 などの認証のエラーで失敗すること（成功したら GitHub に `bypass-test` ができるので消し、設定を見直す）
+
+   ```sh
+   cd "$(mktemp -d)" && git init --quiet && git commit --quiet --allow-empty --message x &&
+     GIT_TERMINAL_PROMPT=0 git push https://github.com/OWNER/REPO.git HEAD:refs/heads/bypass-test; cd -
+   ```
+
+8. エージェントのトークン（ここでは `$GH_TOKEN`）で書き込みの API を呼べない。`403` になること。`401` はトークンが空か無効なので、確かめたことにならない。それ以外（`201` や `422`）なら Contents: write があるので、トークンを作り直す（`201` ならできた `bypass-test` も消す）
+
+   ```sh
+   curl --silent --show-error --output /dev/null --write-out '%{http_code}\n' --request POST \
+     --header "Authorization: Bearer $GH_TOKEN" \
+     --data '{"ref":"refs/heads/bypass-test","sha":"<main のコミットの SHA>"}' \
+     https://api.github.com/repos/OWNER/REPO/git/refs
+   ```
 
 ## 限界
 

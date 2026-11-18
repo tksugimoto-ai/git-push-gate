@@ -1,5 +1,5 @@
 # 利用側のリポジトリを変更せずに使う場合の例（devcontainer が image / Dockerfile 方式で、compose を使わないとき）。
-# ワークスペースの外（例: ~/.config/git-push-gate/REPO/compose.yaml）に置き、ホストで docker compose up -d する。
+# ワークスペースの外（例: ~/.config/git-push-gate/REPO/compose.yaml）に置き、ホストで docker compose up --detach する。
 # 同じディレクトリに config/（github_key, known_hosts, client_keys.pub など）を置く。
 # devcontainer の設定は、devcontainer の中で client/setup.sh を実行する（README を参照）。
 services:

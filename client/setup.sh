@@ -28,7 +28,11 @@ umask 077
 mkdir --parents ~/.ssh
 [ -f ~/.ssh/git-push-gate ] || ssh-keygen -q -t ed25519 -N '' -C git-push-gate-client -f ~/.ssh/git-push-gate
 # 公開鍵のファイルがなくなっていたら、秘密鍵から作り直す
-[ -s ~/.ssh/git-push-gate.pub ] || printf '%s git-push-gate-client\n' "$(ssh-keygen -y -f ~/.ssh/git-push-gate)" > ~/.ssh/git-push-gate.pub
+if [ ! -s ~/.ssh/git-push-gate.pub ]; then
+  public_key=$(ssh-keygen -y -f ~/.ssh/git-push-gate) && [ -n "$public_key" ] \
+    || { echo "~/.ssh/git-push-gate を読めません。消してからやり直してください" >&2; exit 1; }
+  printf '%s git-push-gate-client\n' "$public_key" > ~/.ssh/git-push-gate.pub
+fi
 printf 'git-push-gate %s %s\n' "$host_key_type" "$host_key_data" > ~/.ssh/git-push-gate_known_hosts
 # SSH エージェントは使わず（IdentityAgent none）、この鍵とホスト鍵だけを使う。
 # ~/.ssh/config の Host * にある ProxyCommand や ForwardAgent も、ここで打ち消す（先に書いた値が使われる）

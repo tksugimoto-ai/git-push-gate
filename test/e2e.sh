@@ -6,7 +6,7 @@ set -eu
 IMAGE="${IMAGE:-git-push-gate:test}"
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 CONTAINER_PREFIX="gpg-e2e-$$"            # コンテナ名・ネットワーク名の接頭辞
-WORK_DIR=$(mktemp --directory)
+WORK_DIR=$(mktemp -d)   # ホストで動く部分は、macOS でも動くよう短い形のオプションにする
 NETWORK="$CONTAINER_PREFIX-net"
 
 cleanup() {
@@ -36,7 +36,7 @@ check() { # check 説明 条件（$WORK_DIR/out に出力を書くと、失敗�
 }
 
 docker network create "$NETWORK" >/dev/null
-mkdir --parents "$WORK_DIR/config" "$WORK_DIR/client" "$WORK_DIR/github"
+mkdir -p "$WORK_DIR/config" "$WORK_DIR/client" "$WORK_DIR/github"
 cp "$ROOT/test/e2e-github.sh" "$WORK_DIR/github/start.sh"
 
 # 鍵: GitHub 用（パスフレーズなし・付き）、クライアント用
