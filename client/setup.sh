@@ -16,14 +16,22 @@ set -f; set -- $3   # 「種類 鍵 [コメント]」の形（ゲートの .pub 
 host_key_type=${1:-}; host_key_data=${2:-}
 case "$gate_host" in ''|*[!A-Za-z0-9.:-]*) echo "アドレスが不正です: $gate_host" >&2; exit 1 ;; esac
 case "$gate_port" in ''|*[!0-9]*) echo "ポートが不正です: $gate_port" >&2; exit 1 ;; esac
+[ "$gate_port" -ge 1 ] && [ "$gate_port" -le 65535 ] || { echo "ポートが不正です: $gate_port" >&2; exit 1; }
 case "$host_key_type" in ssh-ed25519) ;; *) echo "ホスト鍵は ssh-ed25519 の公開鍵を指定してください" >&2; exit 1 ;; esac
 case "$host_key_data" in ''|*[!A-Za-z0-9+/=]*) echo "ホスト鍵が不正です" >&2; exit 1 ;; esac
+# 何かを書き込む前に、git のリポジトリの中で、push 先を変える remote があることを確かめる
+remote_name=${REMOTE:-origin}
+git rev-parse --git-dir >/dev/null || { echo "git のリポジトリ（ワークスペース）のディレクトリで実行してください" >&2; exit 1; }
+git remote get-url "$remote_name" >/dev/null || { echo "remote $remote_name がありません（環境変数 REMOTE で指定できます）" >&2; exit 1; }
 
 umask 077
 mkdir --parents ~/.ssh
 [ -f ~/.ssh/git-push-gate ] || ssh-keygen -q -t ed25519 -N '' -C git-push-gate-client -f ~/.ssh/git-push-gate
+# 公開鍵のファイルがなくなっていたら、秘密鍵から作り直す
+[ -s ~/.ssh/git-push-gate.pub ] || printf '%s git-push-gate-client\n' "$(ssh-keygen -y -f ~/.ssh/git-push-gate)" > ~/.ssh/git-push-gate.pub
 printf 'git-push-gate %s %s\n' "$host_key_type" "$host_key_data" > ~/.ssh/git-push-gate_known_hosts
-# SSH エージェントは使わず（IdentityAgent none）、この鍵とホスト鍵だけを使う
+# SSH エージェントは使わず（IdentityAgent none）、この鍵とホスト鍵だけを使う。
+# ~/.ssh/config の Host * にある ProxyCommand や ForwardAgent も、ここで打ち消す（先に書いた値が使われる）
 cat > ~/.ssh/git-push-gate.conf <<EOF
 Host git-push-gate
   HostName $gate_host
@@ -35,14 +43,17 @@ Host git-push-gate
   HostKeyAlias git-push-gate
   UserKnownHostsFile ~/.ssh/git-push-gate_known_hosts
   StrictHostKeyChecking yes
+  ProxyCommand none
+  ProxyJump none
+  ForwardAgent no
 EOF
 # Include は Host より前に置く必要があるので、先頭に足す
 if ! grep -qx 'Include ~/.ssh/git-push-gate.conf' ~/.ssh/config 2>/dev/null; then
   { echo 'Include ~/.ssh/git-push-gate.conf'; cat ~/.ssh/config 2>/dev/null || true; } > ~/.ssh/config.new
   mv ~/.ssh/config.new ~/.ssh/config
 fi
-git remote set-url --push "${REMOTE:-origin}" ssh://git@git-push-gate/repo.git
+git remote set-url --push "$remote_name" ssh://git@git-push-gate/repo.git
 
 echo "push 先を git-push-gate（$gate_host:$gate_port）にしました。"
-echo "まだなら、次の公開鍵をゲートの config/client_keys.pub に足して、ゲートを再起動してください:"
+echo "まだなら、次の 1 行（公開鍵）を、ホストでエディタを使ってゲートの config/client_keys.pub に足し、ゲートを再起動してください:"
 cat ~/.ssh/git-push-gate.pub

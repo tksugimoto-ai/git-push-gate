@@ -119,6 +119,12 @@ docker exec --user dev "$CONTAINER_PREFIX-dev" sh -c "mkdir /home/dev/ws && cd /
   git remote add origin https://github.invalid/repo.git && $(commit x | sed 's/git commit/git -c user.name=t -c user.email=t@example.com commit/')"
 gate_host_key=$(docker exec "$CONTAINER_PREFIX-gate" cat /srv/git/ssh_host_keys/ssh_host_ed25519_key.pub)
 setup() { docker exec --user dev --workdir /home/dev/ws "$CONTAINER_PREFIX-dev" sh /client/setup.sh gate 22 "$gate_host_key"; }
+check "git のリポジトリの外では、何も書かずに止まる" \
+  '! docker exec --user dev --workdir /tmp "$CONTAINER_PREFIX-dev" sh /client/setup.sh gate 22 "$gate_host_key" >"$WORK_DIR/out" 2>&1 &&
+   ! docker exec "$CONTAINER_PREFIX-dev" test -e /home/dev/.ssh/git-push-gate'
+check "存在しない remote では、何も書かずに止まる" \
+  '! docker exec --user dev --workdir /home/dev/ws --env REMOTE=nope "$CONTAINER_PREFIX-dev" sh /client/setup.sh gate 22 "$gate_host_key" >"$WORK_DIR/out" 2>&1 &&
+   ! docker exec "$CONTAINER_PREFIX-dev" test -e /home/dev/.ssh/git-push-gate'
 check "setup.sh が公開鍵を表示する" 'setup >"$WORK_DIR/out" 2>&1 && grep -q "^ssh-ed25519 .* git-push-gate-client$" "$WORK_DIR/out"'
 client_public_key=$(grep '^ssh-ed25519 .* git-push-gate-client$' "$WORK_DIR/out")
 check "公開鍵を登録する前は push できない" \
@@ -127,12 +133,24 @@ run "echo '$client_public_key' >> /w/config/client_keys.pub"
 docker restart "$CONTAINER_PREFIX-gate" >/dev/null; wait_ssh gate "$CONTAINER_PREFIX-gate" >/dev/null
 check "公開鍵を登録した後は、setup.sh で設定した devcontainer から push できる" \
   'docker exec --user dev --workdir /home/dev/ws "$CONTAINER_PREFIX-dev" git push --quiet origin viasetup >"$WORK_DIR/out" 2>&1 && gh_has viasetup'
-check "setup.sh を 2 回実行しても、鍵を作り直さず、設定も重複しない" \
-  'setup >"$WORK_DIR/out" 2>&1 && grep -qF "$client_public_key" "$WORK_DIR/out" &&
+check "setup.sh を 2 回実行しても、鍵を作り直さず（公開鍵のファイルがなくても）、設定も重複しない" \
+  'docker exec --user dev "$CONTAINER_PREFIX-dev" rm /home/dev/.ssh/git-push-gate.pub &&
+   setup >"$WORK_DIR/out" 2>&1 && grep -qF "$client_public_key" "$WORK_DIR/out" &&
    [ "$(docker exec --user dev "$CONTAINER_PREFIX-dev" grep -c git-push-gate.conf /home/dev/.ssh/config)" = 1 ]'
 check "setup.sh は不正なホスト鍵を拒否する" \
   '! docker exec --user dev --workdir /home/dev/ws "$CONTAINER_PREFIX-dev" sh /client/setup.sh gate 22 "ssh-rsa AAAA" >"$WORK_DIR/out" 2>&1'
 docker rm --force "$CONTAINER_PREFIX-dev" >/dev/null
+# client_keys.pub に、公開鍵の形でない行（エージェントの出力を貼るときに紛れた文字など）があれば起動しない
+cp "$WORK_DIR/config/client_keys.pub" "$WORK_DIR/client_keys.pub.ok"
+run "printf '%s\\n' 'ssh-ed25519 AAAA\$(id) x' >> /w/config/client_keys.pub"
+docker restart "$CONTAINER_PREFIX-gate" >/dev/null; sleep 3
+check "client_keys.pub に公開鍵の形でない行があれば、ゲートは起動しない" \
+  '[ "$(docker inspect --format "{{.State.Running}}" "$CONTAINER_PREFIX-gate")" = false ] &&
+   docker logs "$CONTAINER_PREFIX-gate" 2>&1 | grep -q "種類 公開鍵"'
+run "cp /w/client_keys.pub.ok /w/config/client_keys.pub"
+docker start "$CONTAINER_PREFIX-gate" >/dev/null; wait_ssh gate "$CONTAINER_PREFIX-gate" >/dev/null
+check "起動時に、登録したクライアントの鍵のフィンガープリントを出す" \
+  'docker logs "$CONTAINER_PREFIX-gate" 2>&1 | grep -q "SHA256:.*git-push-gate-client"'
 
 # --- パスフレーズ付きの鍵 ---
 start_gate github_key_pp --env UNLOCK_LIFETIME=1h

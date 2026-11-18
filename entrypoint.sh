@@ -47,11 +47,13 @@ fi
 
 # クライアント（devcontainer）の公開鍵を、強制コマンド付きで登録
 client_keys=$(grep -Ev '^[[:space:]]*(#|$)' "$CONFIG_DIR/client_keys.pub" || true)
-# オプション（from= など）付きの行は、前に足すオプションと合わさって無効な鍵になるので拒否する
+# 1 行に 1 つの公開鍵（種類、base64、省略できるコメント）だけを許す。オプション（from= など）付きの行や、
+# 人間がエージェントの出力を貼るときに紛れ込んだ余計な文字は、起動を止めて知らせる
 # 空でも起動する（devcontainer の client/setup.sh が鍵を作るには、先にゲートのホスト鍵が要るため）。誰も push できない
 [ -n "$client_keys" ] || echo "entrypoint: 警告: $CONFIG_DIR/client_keys.pub に公開鍵がないので、まだ誰も push できません" >&2
-if [ -n "$client_keys" ] && printf '%s\n' "$client_keys" | grep -Evq '^(ssh-|ecdsa-|sk-)'; then
-  fail "$CONFIG_DIR/client_keys.pub には、オプションなしの公開鍵だけを書いてください"
+key_line='(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+=*( [A-Za-z0-9@._-]+)?'
+if [ -n "$client_keys" ] && printf '%s\n' "$client_keys" | grep -Evxq "$key_line"; then
+  fail "$CONFIG_DIR/client_keys.pub には、「種類 公開鍵 [コメント]」の形の行だけを書いてください（オプションや余計な文字は使えない）"
 fi
 if [ -n "$client_keys" ]; then
   printf '%s\n' "$client_keys" | sed 's|^|command="/usr/local/bin/git-push-gate",restrict |' > /home/git/.ssh/authorized_keys
@@ -59,6 +61,11 @@ else
   : > /home/git/.ssh/authorized_keys
 fi
 chown git:git /home/git/.ssh/authorized_keys && chmod 600 /home/git/.ssh/authorized_keys
+# 登録した鍵のフィンガープリントを出す（docker compose logs で、意図した鍵だけか確かめられる）
+if [ -n "$client_keys" ]; then
+  echo "entrypoint: 登録したクライアントの鍵:" >&2
+  ssh-keygen -l -f /home/git/.ssh/authorized_keys >&2 || fail "クライアントの鍵を読めません"
+fi
 
 [ -d "$REPO" ] || git init --quiet --bare "$REPO"
 # /srv/git は git ユーザーの持ち物なので、root が書き込む前に、シンボリックリンクに差し替えられていないか確かめる

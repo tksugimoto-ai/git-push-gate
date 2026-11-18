@@ -138,16 +138,18 @@ docker compose exec git-push-gate unlock
 
 ### 3. devcontainer 側の push 先を設定する
 
-devcontainer の中で [client/setup.sh](client/setup.sh)（30 行ほど）を実行します。ホストで実行するスクリプトはありません。setup.sh は次のことをします。書き込むのは `~/.ssh` と `.git/config` だけで、利用側のリポジトリにコミットされるものはありません。
+devcontainer の中で [client/setup.sh](client/setup.sh)（コメントを除いて 40 行ほど）を実行します。ホストで実行するスクリプトはありません。setup.sh は次のことをします。書き込むのは `~/.ssh` と `.git/config` だけで、利用側のリポジトリにコミットされるものはありません。
 
 - クライアント用の鍵を devcontainer の中で作る（秘密鍵は外に出さない。すでにあれば作り直さない）
 - ゲートのホスト鍵を `~/.ssh/git-push-gate_known_hosts` に書き、`~/.ssh/config` に `Host git-push-gate` を足す（SSH エージェントは使わない設定）
 - `git remote set-url --push origin ssh://git@git-push-gate/repo.git`（fetch は今までどおり GitHub から）
 - 作った公開鍵を表示する
 
+ホストでゲートを操作するコマンドは、ゲートを単独で起動したなら、その compose のディレクトリで `docker compose exec git-push-gate …` / `docker compose restart git-push-gate` と書けます。devcontainer の compose に入れたなら、VS Code がプロジェクト名を変えるので、コンテナ名を指定して `docker exec` / `docker restart` を使ってください（`docker ps --filter label=com.docker.compose.service=git-push-gate --format '{{.Names}}'` で分かります）。エージェントが書き換えられる compose のファイルを、ホストで読ませずに済みます。
+
 手順:
 
-1. ホストで、ゲートのホスト鍵を表示します（ゲートの compose のディレクトリで）。
+1. ホストで、ゲートのホスト鍵を表示します。
 
    ```sh
    docker compose exec git-push-gate cat /srv/git/ssh_host_keys/ssh_host_ed25519_key.pub
@@ -161,7 +163,9 @@ devcontainer の中で [client/setup.sh](client/setup.sh)（30 行ほど）を�
 
    秘密の情報を使わないので、AI エージェントに頼んでもかまいません。例: 「client/setup.sh の内容で ~/setup.sh を作り、`sh ~/setup.sh git-push-gate 22 '<ホスト鍵>'` を実行して、表示された公開鍵を教えて」
 
-3. 表示された公開鍵を、ホストでゲートの `config/client_keys.pub` に足し、`docker compose restart` します（パスフレーズ付きの鍵なら、この後もう一度 `unlock`）。
+3. 表示された公開鍵を、ホストでゲートの `config/client_keys.pub` に足し、ゲートだけを再起動します（`docker compose restart git-push-gate`。パスフレーズ付きの鍵なら、この後もう一度 `unlock`）。
+   - **シェルのコマンド（`echo '…' >> client_keys.pub` など）では貼らず、エディタで貼ってください。** エージェントが出した文字列に `'` や `$(…)` が紛れていると、ホストで実行されてしまいます。
+   - 貼るのは `ssh-ed25519 AAAA… git-push-gate-client` の 1 行だけです。ゲートは、この形でない行があると起動を止め、起動時に登録した鍵のフィンガープリントをログ（`docker compose logs git-push-gate`）に出します。
 
 devcontainer をリビルドすると `~/.ssh` が消えるので、2. と 3. をやり直します（古い公開鍵は `client_keys.pub` から消してください）。ゲートのホスト鍵は `/srv/git` のボリュームに保存されるので、ゲートのコンテナを作り直しても変わりません。
 
@@ -219,15 +223,19 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 
 ### 確かめ方
 
-devcontainer を作ったら（リビルドのたびに）、devcontainer の中で次を実行し、**どれも失敗する（何も出ない）**ことを確かめてください。ゲートを通らずに GitHub に書き込める経路がないかの確認です。
+devcontainer を作ったら（リビルドのたびに）、**エージェントを動かす前に**、devcontainer の中で次を実行してください。ゲートを通らずに GitHub に書き込める経路がないかの確認です（エージェントが動いた後は、エージェントが結果を変えられる）。HTTPS の push は、VS Code の統合ターミナルで実行してください（`GIT_ASKPASS` が設定されるのはそこだけです）。
 
-```sh
-ls /var/run/docker.sock /var/run/docker-host.sock 2>/dev/null; echo "DOCKER_HOST=${DOCKER_HOST:-}"   # Docker を操作できない
-echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-}"; ls /tmp/vscode-ssh-auth-*.sock 2>/dev/null                      # SSH エージェントがない
-ssh -T -o BatchMode=yes git@github.com                                                                     # GitHub に SSH で認証できない
-git config --get-all credential.helper                                                                     # VS Code の credential helper がない
-git push https://github.com/OWNER/REPO.git HEAD:refs/heads/bypass-test                                     # HTTPS で push できない
-```
+| コマンド | 期待する結果 |
+|---|---|
+| `ls /var/run/docker.sock /var/run/docker-host.sock /run/docker.sock; echo "DOCKER_HOST=${DOCKER_HOST:-}"` | `ls` はどれも「No such file」、`DOCKER_HOST=` は空 |
+| `echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-}"; ls /tmp/vscode-ssh-auth-*.sock; ssh-add -l` | 空、「No such file」、「Could not open a connection to your authentication agent」 |
+| `ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new git@github.com` | 「Permission denied (publickey)」（「Host key verification failed」では確かめたことにならない） |
+| `ls ~/.ssh; ls ~/.git-credentials` | `~/.ssh` には `git-push-gate` で始まるファイルと `config`・`known_hosts` だけ、`~/.git-credentials` はない |
+| `git config --show-origin --get-regexp 'credential\.\|url\..*\.insteadof'` | 何も出ない（エージェントの読み取り専用のトークンを `gh auth setup-git` で設定したなら、その helper だけ） |
+| `env \| grep -iE 'token\|askpass\|ssh_auth'` | エージェント用の読み取り専用のトークン以外は出ない（`GIT_ASKPASS` が出たら VS Code の設定を見直す） |
+| `ls ~/.config/git-push-gate` | 「No such file」（ゲートの設定ディレクトリがマウントされていない） |
+| `GIT_TERMINAL_PROMPT=0 git push https://github.com/OWNER/REPO.git HEAD:refs/heads/bypass-test` | 認証のエラーで失敗する（成功したら GitHub に `bypass-test` ができるので消し、設定を見直す） |
+| エージェントのトークン（ここでは `$GH_TOKEN`）で書き込みの API を呼ぶ: `curl --silent --show-error --output /dev/null --write-out '%{http_code}\n' --request POST --header "Authorization: Bearer $GH_TOKEN" --data '{"ref":"refs/heads/bypass-test","sha":"<main の SHA>"}' https://api.github.com/repos/OWNER/REPO/git/refs` | `403`（`201` ならトークンに Contents: write がある。できた `bypass-test` を消し、トークンを作り直す） |
 
 ## 限界
 
