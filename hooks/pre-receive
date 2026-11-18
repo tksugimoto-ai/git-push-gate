@@ -30,8 +30,9 @@ die() {
 tip() { git show-ref --verify --hash "$1" 2>/dev/null || true; }
 # 保護ブランチなどは entrypoint がリポジトリの設定に書き込む（sshd 経由では環境変数が届かないため）
 PROTECTED=$(git config --get gate.protected) || PROTECTED=""
-# 設定がない（終了コード 1）ときだけ制限なし。読めないときは拒否する（制限なしと取り違えない）
-PREFIXES=$(git config --get gate.allowedPrefixes) || { [ $? -eq 1 ] || die "gate.allowedPrefixes を読めません"; PREFIXES=""; }
+# 制限なしは entrypoint が「*」と書き込む。読めないとき（設定がないときも）は拒否する（制限なしと取り違えない）
+PREFIXES=$(git config --get gate.allowedPrefixes) && [ -n "$PREFIXES" ] || die "gate.allowedPrefixes を読めません"
+[ "$PREFIXES" != "*" ] || PREFIXES=""
 # shellcheck disable=SC2086
 set -- $PROTECTED
 [ $# -gt 0 ] || die "gate.protected が設定されていないか、空です"
@@ -40,6 +41,8 @@ set -- $PROTECTED
 [ "$(git config --bool --get receive.fsckObjects || true)" = true ] || die "receive.fsckObjects が有効ではありません"
 # 変な mode（40777 や 100600 など）は ls-tree が正規化して表示し、比較では同じに見えるので、fsck で拒否させる
 [ "$(git config --get receive.fsck.badFilemode || true)" = error ] || die "receive.fsck.badFilemode が error ではありません"
+# push 証明書は使わない（案内していなくても receive-pack は受け取ってしまう）
+[ -z "${GIT_PUSH_CERT:-}" ] || die "push 証明書（--signed）は使えません"
 # 小文字にする。tr が止まると空になるので、長さが変わらないことを確かめる。$(...) の中で呼ぶので、呼び出し側でも || die する
 lower() {
   l=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') && [ "${#l}" -eq "${#1}" ] || die "小文字に変換できません"
@@ -69,11 +72,13 @@ tree_ok() { # ディレクトリでないもの（シンボリックリンクな
 }
 workflows() { git ls-tree -r "$1" -- "$WF/" || die "$1 のワークフローを読めません"; }   # パスは常に同じ規則で引用されるので、行どうしで比べてよい
 lines() { # lines 文字列 関数名: 文字列の各行（空行を除く）について関数を呼ぶ。偽を返したら、そこで偽を返す
-  set -- "$1$NL" "$2"
-  while [ -n "$1" ]; do
-    x=${1%%"$NL"*}; set -- "${1#*"$NL"}" "$2"
-    [ -z "$x" ] || "$2" "$x" || return 1
+  # 改行で区切った for にする（行ごとに残りの文字列をコピーすると、行の数の 2 乗の時間がかかり、
+  # 大きな木を push されるとロックを持ったまま何時間も動き続ける）。set -f なのでグロブ展開はされない
+  oIFS=$IFS; IFS=$NL
+  for x in $1; do
+    IFS=$oIFS; "$2" "$x" || return 1; IFS=$NL
   done
+  IFS=$oIFS
 }
 top_ok() { case "$1" in .github) ;; .[gG][iI][tT][hH][uU][bB]) return 1 ;; esac; }
 sub_ok() {

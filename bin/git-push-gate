@@ -30,6 +30,11 @@ flock -w 300 9 || { echo "git-push-gate: ほかの push が終わらないため
 # これでクライアント側の fast-forward 判定と、pre-receive の lease が GitHub と一致する。
 # 整理（gc）。fetch や receive-pack の中では止めていて、フックの中では一時領域しか見ないので、ここで行う
 git -c gc.autoDetach=false --git-dir="$REPO" gc --auto --quiet || echo "git-push-gate: 警告: gc に失敗しました" >&2
+# receive-pack は push 証明書を、受け付ける大きさの上限と関係なく、フックより前に本体のオブジェクト置き場に書く
+# （拒否した push でも残る。下の ulimit -f で途中で切れた一時ファイルも残る）。
+# 緩いオブジェクトと一時ファイルが合わせて 100MB を超えたら消す（ロックを持っているので、使っている途中のものはない）
+loose=$(git --git-dir="$REPO" count-objects -v 2>/dev/null | awk '$1 == "size:" || $1 == "size-garbage:" { s += $2 } END { print s + 0 }')
+[ "${loose:-0}" -lt 102400 ] || git --git-dir="$REPO" prune --expire=now || echo "git-push-gate: 警告: prune に失敗しました" >&2
 # 一度も fetch できていなければ（起動時の fetch の失敗など）、全履歴を取るので時間制限を長くする。
 # 時間切れの fetch は途中から再開しないので、人間が大きな push をした後でも足りるよう、余裕を持たせる
 if [ -n "$(git --git-dir="$REPO" for-each-ref --count=1 refs/heads/)" ]; then limit=600; else limit=1800; fi
@@ -40,4 +45,10 @@ timeout "$limit" git -c gc.auto=0 -c maintenance.auto=false --git-dir="$REPO" fe
 # 止まったクライアントがロックを持ち続けないよう、受け付けの時間に上限を付ける。
 # 上限で止まるのは receive-pack だけで、GitHub への push（pre-receive の中、別に 300 秒の上限）は
 # 終わっていることがある。クライアントには失敗と返るので、fetch して確かめること
+# 受け付けに使う資源にも上限を付ける。1 つのファイルの大きさは、受け付ける大きさの上限（receive.maxInputSize）に
+# 余裕を足したもの（push 証明書の大きさも、これで抑える）。CPU 時間は、止まらない検査がロックを持ち続けないように
+# （receive-pack が時間切れで止まっても、フックは動き続けることがある）
+max=$(git --git-dir="$REPO" config --int receive.maxInputSize) || max=524288000
+ulimit -f $(( max / 512 + 2048 ))
+ulimit -t 1200
 exec timeout 600 git-receive-pack "$REPO"

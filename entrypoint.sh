@@ -73,7 +73,8 @@ case "$PREFIXES" in
 esac
 # shellcheck disable=SC2086
 set -- $PREFIXES; PREFIXES="$*"; set --
-if [ -n "$PREFIXES" ]; then g config gate.allowedPrefixes "$PREFIXES"; else g config --unset gate.allowedPrefixes || true; fi
+# 制限なしは「*」と書く（フックは、設定を読めなければ拒否する。パターンは上で拒否しているので取り違えない）
+g config gate.allowedPrefixes "${PREFIXES:-*}"
 # 壊れたオブジェクト（同じ名前の項目が 2 つある木など）は受け付けない
 g config receive.fsckObjects true
 # 変な mode（40777 や 100600 など）も拒否する（既定では警告だけで、ls-tree は正規化して表示する）
@@ -101,6 +102,7 @@ if [ -z "$agent_sock" ]; then
   su -s /bin/sh git -c "git --git-dir=$REPO fetch --prune --no-tags --quiet upstream '+refs/heads/*:refs/heads/*'" \
     || echo "entrypoint: 警告: GitHub から fetch できません（UPSTREAM・鍵・known_hosts を確認してください）" >&2
 fi
-# push の中では gc を止めているので、起動時に整理する（push を受け付ける前なのでロックは要らない）
-su -s /bin/sh git -c "git --git-dir=$REPO gc --auto --quiet" || echo "entrypoint: 警告: gc に失敗しました" >&2
+# push の中では gc を止めているので、起動時に整理する（push を受け付ける前なのでロックは要らない）。
+# どこからも使われていないオブジェクト（拒否された push の証明書など）も、すぐ消す（ゲートは GitHub の写しなので、消して困るものはない）
+su -s /bin/sh git -c "git --git-dir=$REPO gc --auto --quiet && git --git-dir=$REPO prune --expire=now" || echo "entrypoint: 警告: gc に失敗しました" >&2
 exec /usr/sbin/sshd -D -e -h "$HOSTKEYS/ssh_host_ed25519_key"

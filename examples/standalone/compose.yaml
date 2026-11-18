@@ -13,6 +13,8 @@ services:
       # UNLOCK_LIFETIME: 8h   # パスフレーズ付きの鍵を解除しておく時間（既定は無期限）
       # MAX_PUSH_SIZE: 500m   # 1 回の push で受け付ける大きさの上限（既定 500m）
       # ALLOWED_BRANCH_PREFIXES: "agent/"   # この接頭辞のブランチしか作成・更新・削除させない
+    # 使えるメモリの上限（エージェントが大きなデータを送って、ホストのメモリを使い切らないように）。リポジトリが大きければ増やす
+    mem_limit: 2g
     ports:
       # 公開先のアドレスは環境で変える（.env に GATE_BIND=172.17.0.1 のように書く）
       #   Docker Desktop（Mac / Windows。WSL2 バックエンドを含む）: 127.0.0.1（既定）

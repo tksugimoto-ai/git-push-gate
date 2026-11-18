@@ -23,6 +23,7 @@ git --git-dir=gate.git config remote.upstream.url "$T/gh.git"
 git --git-dir=gate.git config gate.protected "main develop"   # 以下 4 つは entrypoint.sh が書き込むもの
 git --git-dir=gate.git config receive.fsckObjects true
 git --git-dir=gate.git config receive.fsck.badFilemode error
+git --git-dir=gate.git config gate.allowedPrefixes "*"
 git --git-dir=gate.git config receive.denyDeleteCurrent ignore
 git --git-dir=gate.git config receive.autogc false
 # ローカル転送だと quarantine 用の環境変数が上流に漏れるので外す（SSH 越しの GitHub では不要）
@@ -223,7 +224,7 @@ git switch -qC pfx origin/main; echo p > p; git add p; git commit -qm pfx
 expect ng "許可されていない接頭辞のブランチ" origin pfx
 expect ok "許可された接頭辞のブランチ" origin pfx:refs/heads/agent/pfx
 expect ng "許可されていない接頭辞のブランチの削除" origin :stale
-git --git-dir="$T/gate.git" config --unset gate.allowedPrefixes
+git --git-dir="$T/gate.git" config gate.allowedPrefixes "*"
 # UTF-8 の C1 制御文字（U+009B は CSI）や、表示の向きを変える文字（U+202E）を含む名前は、記録に書かずに拒否
 git switch -qC u8 origin/main; echo u > u; git add u; git commit -qm u8
 expect ng "C1 制御文字を含む名前" origin "u8:refs/heads/ok$(printf '\302\233')2J"
@@ -275,6 +276,23 @@ chmod +x "$T/shim/tr"
 if printf '%s %s refs/heads/Main\n' 0000000000000000000000000000000000000000 "$(git rev-parse origin/main)" \
    | (cd "$T/gate.git" && PATH="$T/shim:$PATH" GIT_DIR=. sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 || gh_has Main
 then fail=$((fail+1)); echo "FAIL tr が失敗しても Main を拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   tr が失敗しても Main を拒否"; fi
+# 直下に項目がとても多い木も、すぐに判定する（行の数の 2 乗の時間がかかると、ロックを持ったまま動き続ける）
+eb=$(git hash-object -w --stdin </dev/null)
+big=$( { git ls-tree origin/main; seq 20000 | sed "s/^/100644 blob $eb	f/"; } | git mktree)
+start=$(date +%s)
+expect ok "直下に 20000 個の項目がある木" origin "$(git commit-tree "$big" -p origin/main -m big):refs/heads/big"
+el=$(( $(date +%s) - start ))
+if [ "$el" -le 60 ]; then pass=$((pass+1)); echo "ok   20000 個の項目の判定が 60 秒以内（$el 秒）"; else fail=$((fail+1)); echo "FAIL 20000 個の項目の判定に $el 秒かかった"; fi
+# push 証明書の付いた push と、許可する接頭辞の設定がないゲートは拒否
+for v in cert noprefix; do
+  d="push 証明書の付いた push を拒否"
+  [ $v = cert ] || { d="許可する接頭辞の設定がなければ拒否"; git --git-dir="$T/gate.git" config --unset gate.allowedPrefixes; }
+  if printf '%s %s refs/heads/%s\n' 0000000000000000000000000000000000000000 "$(git rev-parse origin/main)" "$v" \
+     | (cd "$T/gate.git" && if [ $v = cert ]; then export GIT_PUSH_CERT=0123; fi; GIT_DIR=. sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 || gh_has "$v" \
+     || ! grep -Eq 'push 証明書|gate.allowedPrefixes を読めません' "$T/out"
+  then fail=$((fail+1)); echo "FAIL $d"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   $d"; fi
+done
+git --git-dir="$T/gate.git" config gate.allowedPrefixes "*"
 # 後から同じ名前のタグができたブランチは、更新はできないが、削除はできる
 ( cd "$T/seed" && git tag v7 origin/main && git push -q origin v7 )
 expect ng "タグと同じ名前になったブランチの更新" origin --force origin/main:refs/heads/v7
