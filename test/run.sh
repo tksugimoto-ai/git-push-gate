@@ -234,6 +234,29 @@ then fail=$((fail+1)); echo "FAIL ASCII 以外の文字を記録に書かない"
 expect ng "軽量タグと同じ名前のブランチ" origin u8:v9
 expect ng "注釈付きタグと同じ名前のブランチ" origin u8:refs/heads/v8
 expect ok "タグと違う名前のブランチ" origin u8:refs/heads/v7
+# 後から同じ名前のタグができたブランチは、更新はできないが、削除はできる
+( cd "$T/seed" && git tag v7 origin/main && git push -q origin v7 )
+expect ng "タグと同じ名前になったブランチの更新" origin --force origin/main:refs/heads/v7
+expect ok "タグと同じ名前になったブランチの削除" origin :refs/heads/v7
+# 長すぎる ref 名は、記録に書かずに拒否
+long=$(printf 'l%.0s' $(seq 300))
+expect ng "255 バイトを超える ref 名" origin "u8:refs/heads/$long"
+if grep -q "$long" "$T/gate.git/push-gate.log"
+then fail=$((fail+1)); echo "FAIL 長すぎる ref 名を記録に書かない"; else pass=$((pass+1)); echo "ok   長すぎる ref 名を記録に書かない"; fi
+# 1 回の push の ref の数は 50 まで
+expect ng "51 個の ref を一度に push" origin $(for i in $(seq 51); do printf 'u8:refs/heads/many%s ' "$i"; done)
+gh_has many1 && { fail=$((fail+1)); echo "FAIL 51 個のうちどれかが GitHub に届いた"; }
+# 判定の間に GitHub の保護ブランチが更新された（ref を送り終える前に人間が main を直す）
+# （最後の : は、dash が上の ( ) を fork せずに実行して、push の前にパイプを閉じてしまうのを防ぐ）
+# （ゲートにあるコミットを使う。フックを直接呼ぶので、新しいオブジェクトは渡せない）
+{ printf '%s %s refs/heads/race2\n' 0000000000000000000000000000000000000000 "$(git rev-parse origin/main)"; sleep 3
+  ( cd "$T/seed" && git fetch -q && git switch -qC fix3 origin/main && echo '# fix3' >> .github/workflows/ci.yml \
+    && git commit -qam fix3 && git push -q origin HEAD:main ) >/dev/null 2>&1
+  : ; } \
+  | (cd "$T/gate.git" && GIT_DIR=. sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 && rc=0 || rc=1
+if [ $rc -eq 0 ] || ! grep -q '受け付けを始めた後に GitHub で更新' "$T/out" || gh_has race2
+then fail=$((fail+1)); echo "FAIL 判定の間に保護ブランチが更新されたら拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   判定の間に保護ブランチが更新されたら拒否"; fi
+git fetch -q; git --git-dir="$T/gate.git" fetch -q --prune upstream '+refs/heads/*:refs/heads/*'
 
 # パスフレーズ付きの鍵が未解除のとき
 if command -v ssh-agent >/dev/null; then
@@ -252,5 +275,11 @@ L="$T/gate.git/push-gate.log"
 if grep -v ' REJECTED ' "$L" | grep -q ' refs/heads/feat ' && ! grep -v ' REJECTED ' "$L" | grep -q 'refs/heads/main' \
    && grep ' REJECTED ' "$L" | grep -q 'refs/heads/main への push は禁止'
 then pass=$((pass+1)); echo "ok   受け付けた更新と拒否を記録"; else fail=$((fail+1)); echo "FAIL 受け付けた更新と拒否を記録"; sed 's/^/     /' "$L"; fi
+# 記録が 10MB を超えたら、拒否は書かない
+cp "$L" "$T/log.bak"; head -c 10485760 /dev/zero | tr '\0' x >> "$L"; size=$(wc -c < "$L")
+expect ng "記録が大きいときの main への push" origin HEAD:main
+SSH_ORIGINAL_COMMAND=ls GIT_PUSH_GATE_REPO="$T/gate.git" sh "$ROOT/bin/git-push-gate" >"$T/out" 2>&1 || true
+if [ "$(wc -c < "$L")" -eq "$size" ]; then pass=$((pass+1)); echo "ok   記録が 10MB を超えたら拒否を書かない"; else fail=$((fail+1)); echo "FAIL 記録が 10MB を超えたら拒否を書かない"; fi
+mv "$T/log.bak" "$L"
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

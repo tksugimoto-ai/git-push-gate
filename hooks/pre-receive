@@ -4,8 +4,12 @@
 set -euf   # -f: 保護ブランチ名をグロブ展開しない
 zero=0000000000000000000000000000000000000000
 # 拒否も記録する（人間がいちばん知りたいのは、main やワークフローを変えようとした試み）
+# 記録でボリュームを埋められないよう、10MB を超えたら拒否は書かない（受け付けた更新は書く）
 die() {
-  printf '%s REJECTED %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$(git rev-parse --git-dir)/push-gate.log" 2>/dev/null || true
+  logf="$(git rev-parse --git-dir)/push-gate.log"
+  if [ "$({ wc -c < "$logf"; } 2>/dev/null || echo 0)" -lt 10485760 ]; then
+    printf '%s REJECTED %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$logf" 2>/dev/null || true
+  fi
   echo "git-push-gate: $*" >&2; exit 1
 }
 # ブランチは名前どおりに引く（rev-parse はないと refs/tags/... などに読み替えるので使わない）
@@ -29,9 +33,10 @@ done
 # GitHub の今の状態を、判定の直前にもう一度確かめる。push を始めてからデータを送り終えるまで（最大 10 分）の間に
 # 人間が保護ブランチのワークフローを直していたら、受け付けの前の fetch の値で判定することになるため。
 # タグも取る（ゲートはタグを fetch しないので、同じ名前のブランチを作らせないために使う）
+# GitHub に push する直前にもう一度取り、変わっていないことを確かめる（下記）
 # shellcheck disable=SC2046
-remote=$(timeout 60 git ls-remote --symref upstream HEAD 'refs/tags/*' $(for b in $PROTECTED; do printf 'refs/heads/%s ' "$b"; done)) \
-  || die "GitHub の状態を確かめられません"
+snapshot() { timeout 60 git ls-remote --symref upstream HEAD 'refs/tags/*' $(for b in $PROTECTED; do printf 'refs/heads/%s ' "$b"; done); }
+remote=$(snapshot) || die "GitHub の状態を確かめられません"
 for b in $PROTECTED; do
   [ "$(printf '%s\n' "$remote" | awk -v r="refs/heads/$b" '$1 != "ref:" && $2 == r { print $1 }')" = "$(tip "refs/heads/$b")" ] \
     || die "保護ブランチ $b が、受け付けを始めた後に GitHub で更新されました。やり直してください"
@@ -90,11 +95,16 @@ check_commit() { # check_commit ref new
   die "$1: .github/workflows か .github/actions が、どの保護ブランチとも一致しないため拒否。main に rebase するか、人間が push してください"
 }
 
-set --; log=""
+set --; log=""; n=0
 while IFS= read -r line; do
+  # 1 回の push の ref の数に上限を付ける（数が多いと判定に時間がかかり、確かめた GitHub の状態が古くなる）
+  n=$((n+1)); [ "$n" -le 50 ] || die "一度に push できる ref は 50 個までです。分けて push してください"
   # 印字できる ASCII 以外を含む行は、記録やメッセージに名前を出さずに拒否する。制御文字（端末の制御シーケンス）のほか、
   # UTF-8 の C1 制御文字（U+009B は CSI として働く）や、表示の向きを変える文字（U+202E など。…/Main に見せかける）も含む
-  if printf '%s' "$line" | LC_ALL=C grep -q '[^ -~]'; then die "不正な更新の指定です（制御文字か、ASCII 以外の文字を含む）"; fi
+  # 「すべてが印字できる ASCII か」を確かめる形にする（grep 自体が失敗しても拒否になるように）
+  printf '%s\n' "$line" | LC_ALL=C grep -qx '[ -~]*' || die "不正な更新の指定です（制御文字か、ASCII 以外の文字を含む）"
+  # 長すぎる名前も、記録に書かずに拒否する（記録でボリュームを埋められないように）。82 は old と new と空白 2 つ
+  [ "${#line}" -le $((82 + 255)) ] || die "不正な更新の指定です（ref 名が 255 バイトを超えている）"
   # 行をそのまま読み、「old new ref」の形でなければ拒否する（read で区切ると、末尾の空白などが取り除かれ、
   # receive-pack が後で拒否する名前を、整えた名前で GitHub に push してしまう）
   old=${line%% *}; rest=${line#* }; new=${rest%% *}; ref=${rest#* }
@@ -119,8 +129,8 @@ while IFS= read -r line; do
     [ "$(lower "$name")" != "$(lower "$b")" ] || die "$ref への push は禁止"
   done
   # GitHub にある同じ名前のタグ（v1.2.3 など）。短い名前で引くツール（git clone --branch、uses: owner/repo@v1 など）が
-  # ブランチの方を取ることがある
-  if printf '%s\n' "$remote" | awk -v r="refs/tags/$name" '$1 != "ref:" && ($2 == r || $2 == r "^{}") { f=1 } END { exit !f }'; then
+  # ブランチの方を取ることがある。削除は紛らわしさをなくすので許す
+  if [ "$new" != "$zero" ] && printf '%s\n' "$remote" | awk -v r="refs/tags/$name" '$1 != "ref:" && ($2 == r || $2 == r "^{}") { f=1 } END { exit !f }'; then
     die "$ref は GitHub にある同じ名前のタグと紛らわしいため拒否"
   fi
   # 許可する接頭辞（ALLOWED_BRANCH_PREFIXES）が設定されていれば、それ以外のブランチは作成・更新・削除させない
@@ -146,6 +156,10 @@ while IFS= read -r line; do
 done
 
 [ $# -eq 0 ] && exit 0
+# 判定に使った GitHub の状態（保護ブランチ・タグ・デフォルトブランチ）が、判定の間に変わっていないことを確かめる。
+# 残る隙間は、この後の GitHub への push の間（最大 5 分）だけ
+now=$(snapshot) || die "GitHub の状態を確かめられません"
+[ "$now" = "$remote" ] || die "保護ブランチかタグが、受け付けを始めた後に GitHub で更新されました。やり直してください"
 timeout 300 git push --atomic --quiet upstream "$@" \
   || die "GitHub への push に失敗しました（時間切れを含む。時間切れのときは GitHub に反映されていることがあるので、fetch して確かめてください）"
 # 受け付けた更新の記録（人間が後で確かめられるように）。GitHub への push が成功したものだけ
