@@ -24,6 +24,8 @@ git --git-dir=gate.git config gate.protected "main develop"   # 以下 4 つは 
 git --git-dir=gate.git config receive.fsckObjects true
 git --git-dir=gate.git config receive.fsck.badFilemode error
 git --git-dir=gate.git config gate.allowedPrefixes "*"
+git --git-dir=gate.git config fetch.unpackLimit 1
+git --git-dir=gate.git config receive.unpackLimit 1
 git --git-dir=gate.git config receive.denyDeleteCurrent ignore
 git --git-dir=gate.git config receive.autogc false
 # ローカル転送だと quarantine 用の環境変数が上流に漏れるので外す（SSH 越しの GitHub では不要）
@@ -293,6 +295,17 @@ for v in cert noprefix; do
   then fail=$((fail+1)); echo "FAIL $d"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   $d"; fi
 done
 git --git-dir="$T/gate.git" config gate.allowedPrefixes "*"
+# 受け取りかけのデータ（止まった receive-pack の残り）と、使われていない緩いオブジェクト（100MB 超）は、次の push の前に消す
+G="$T/gate.git/objects"
+mkdir -p "$G/tmp_objdir-incoming-x" "$G/ab"; echo x > "$G/tmp_objdir-incoming-x/tmp_pack_x"
+head -c 105000000 /dev/zero > "$G/ab/tmp_obj_x"
+git switch -qC clean origin/main; echo c > c; git add c; git commit -qm clean
+expect ok "掃除の後の push" origin clean
+if [ ! -e "$G/tmp_objdir-incoming-x" ] && [ ! -e "$G/ab/tmp_obj_x" ]; then pass=$((pass+1)); echo "ok   受け取りかけのデータと不要なファイルを消す"
+else fail=$((fail+1)); echo "FAIL 受け取りかけのデータと不要なファイルを消す"; fi
+# 受け取ったものはパックのまま置く（緩いオブジェクトは、どれも使われていないものになる）
+if [ "$(git --git-dir="$T/gate.git" count-objects -v | sed -n 's/^count: //p')" = 0 ]; then pass=$((pass+1)); echo "ok   ゲートに緩いオブジェクトがない"
+else fail=$((fail+1)); echo "FAIL ゲートに緩いオブジェクトがある"; git --git-dir="$T/gate.git" count-objects -v; fi
 # 後から同じ名前のタグができたブランチは、更新はできないが、削除はできる
 ( cd "$T/seed" && git tag v7 origin/main && git push -q origin v7 )
 expect ng "タグと同じ名前になったブランチの更新" origin --force origin/main:refs/heads/v7

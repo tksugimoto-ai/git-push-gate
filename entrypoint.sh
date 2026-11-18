@@ -86,6 +86,10 @@ g config receive.denyDeleteCurrent ignore
 g config receive.autogc false
 # 受け付ける大きさの上限（ボリュームを埋められないように）
 g config receive.maxInputSize "${MAX_PUSH_SIZE:-500m}"
+# 受け取ったもの（fetch と push）は常にパックのまま置き、緩いオブジェクトにしない。
+# 緩いオブジェクトがあれば、どれも使われていないもの（拒否した push の証明書など）と分かり、すぐ消せる
+g config fetch.unpackLimit 1
+g config receive.unpackLimit 1
 install -o root -g root -m 755 /usr/local/share/git-push-gate/pre-receive "$REPO/hooks/pre-receive"
 chown -R -h git:git "$REPO"   # -h: シンボリックリンクの先を変えない
 chown -h root:root "$REPO/hooks" "$REPO/hooks/pre-receive" "$REPO/config"
@@ -104,5 +108,7 @@ if [ -z "$agent_sock" ]; then
 fi
 # push の中では gc を止めているので、起動時に整理する（push を受け付ける前なのでロックは要らない）。
 # どこからも使われていないオブジェクト（拒否された push の証明書など）も、すぐ消す（ゲートは GitHub の写しなので、消して困るものはない）
-su -s /bin/sh git -c "git --git-dir=$REPO gc --auto --quiet && git --git-dir=$REPO prune --expire=now" || echo "entrypoint: 警告: gc に失敗しました" >&2
+# 前の版で作られた、使われている緩いオブジェクトはパックにまとめる（repack -d）
+su -s /bin/sh git -c "git --git-dir=$REPO gc --auto --quiet && git --git-dir=$REPO prune --expire=now && git --git-dir=$REPO repack -d -q" \
+  || echo "entrypoint: 警告: gc に失敗しました" >&2
 exec /usr/sbin/sshd -D -e -h "$HOSTKEYS/ssh_host_ed25519_key"
