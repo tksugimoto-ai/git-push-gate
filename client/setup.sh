@@ -9,23 +9,25 @@
 # 人間がゲートの config/client_keys.pub に足して、ゲートを再起動する。
 # 書き込むのは ~/.ssh と .git/config だけで、利用側のリポジトリにコミットされるものはない。
 set -eu
+# オプションはなるべく長い形で書く（短い形のままのものは、busybox や OpenSSH に長い形がないもの）
 [ $# -eq 3 ] || { echo "使い方: sh setup.sh <ゲートのアドレス> <ポート> '<ゲートのホスト鍵>'" >&2; exit 1; }
-host=$1; port=$2
+gate_host=$1; gate_port=$2
 set -f; set -- $3   # 「種類 鍵 [コメント]」の形（ゲートの .pub をそのまま貼ってよい）
-case "$host" in ''|*[!A-Za-z0-9.:-]*) echo "アドレスが不正です: $host" >&2; exit 1 ;; esac
-case "$port" in ''|*[!0-9]*) echo "ポートが不正です: $port" >&2; exit 1 ;; esac
-case "${1:-}" in ssh-ed25519) ;; *) echo "ホスト鍵は ssh-ed25519 の公開鍵を指定してください" >&2; exit 1 ;; esac
-case "${2:-}" in ''|*[!A-Za-z0-9+/=]*) echo "ホスト鍵が不正です" >&2; exit 1 ;; esac
+host_key_type=${1:-}; host_key_data=${2:-}
+case "$gate_host" in ''|*[!A-Za-z0-9.:-]*) echo "アドレスが不正です: $gate_host" >&2; exit 1 ;; esac
+case "$gate_port" in ''|*[!0-9]*) echo "ポートが不正です: $gate_port" >&2; exit 1 ;; esac
+case "$host_key_type" in ssh-ed25519) ;; *) echo "ホスト鍵は ssh-ed25519 の公開鍵を指定してください" >&2; exit 1 ;; esac
+case "$host_key_data" in ''|*[!A-Za-z0-9+/=]*) echo "ホスト鍵が不正です" >&2; exit 1 ;; esac
 
 umask 077
-mkdir -p ~/.ssh
+mkdir --parents ~/.ssh
 [ -f ~/.ssh/git-push-gate ] || ssh-keygen -q -t ed25519 -N '' -C git-push-gate-client -f ~/.ssh/git-push-gate
-printf 'git-push-gate %s %s\n' "$1" "$2" > ~/.ssh/git-push-gate_known_hosts
+printf 'git-push-gate %s %s\n' "$host_key_type" "$host_key_data" > ~/.ssh/git-push-gate_known_hosts
 # SSH エージェントは使わず（IdentityAgent none）、この鍵とホスト鍵だけを使う
 cat > ~/.ssh/git-push-gate.conf <<EOF
 Host git-push-gate
-  HostName $host
-  Port $port
+  HostName $gate_host
+  Port $gate_port
   User git
   IdentityFile ~/.ssh/git-push-gate
   IdentitiesOnly yes
@@ -41,6 +43,6 @@ if ! grep -qx 'Include ~/.ssh/git-push-gate.conf' ~/.ssh/config 2>/dev/null; the
 fi
 git remote set-url --push "${REMOTE:-origin}" ssh://git@git-push-gate/repo.git
 
-echo "push 先を git-push-gate（$host:$port）にしました。"
+echo "push 先を git-push-gate（$gate_host:$gate_port）にしました。"
 echo "まだなら、次の公開鍵をゲートの config/client_keys.pub に足して、ゲートを再起動してください:"
 cat ~/.ssh/git-push-gate.pub

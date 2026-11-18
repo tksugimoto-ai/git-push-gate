@@ -84,8 +84,8 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 **ワークスペース（devcontainer にマウントされるディレクトリ）の外**に設定ディレクトリを作ります。
 
 ```sh
-dir=~/.config/git-push-gate/REPO
-mkdir -p "$dir" && cd "$dir"
+gate_dir=~/.config/git-push-gate/REPO
+mkdir --parents "$gate_dir" && cd "$gate_dir"
 
 # GitHub 用の鍵（この用途専用に作る。パスフレーズは付けても付けなくてもよい）
 ssh-keygen -t ed25519 -C git-push-gate -f github_key
@@ -177,7 +177,7 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
    cd ~/.config/git-push-gate/REPO
    docker info --format '{{.OperatingSystem}}'   # Docker Desktop か、それ以外か
    echo GATE_BIND=172.17.0.1 > .env               # Docker Desktop 以外のときだけ（docker0 の IP）
-   docker compose up -d
+   docker compose up --detach
    ```
 
    | Docker | 公開先（`GATE_BIND`） | devcontainer から見たゲート |
@@ -222,7 +222,7 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 devcontainer を作ったら（リビルドのたびに）、devcontainer の中で次を実行し、**どれも失敗する（何も出ない）**ことを確かめてください。ゲートを通らずに GitHub に書き込める経路がないかの確認です。
 
 ```sh
-ls -l /var/run/docker.sock /var/run/docker-host.sock 2>/dev/null; echo "DOCKER_HOST=${DOCKER_HOST:-}"   # Docker を操作できない
+ls /var/run/docker.sock /var/run/docker-host.sock 2>/dev/null; echo "DOCKER_HOST=${DOCKER_HOST:-}"   # Docker を操作できない
 echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-}"; ls /tmp/vscode-ssh-auth-*.sock 2>/dev/null                      # SSH エージェントがない
 ssh -T -o BatchMode=yes git@github.com                                                                     # GitHub に SSH で認証できない
 git config --get-all credential.helper                                                                     # VS Code の credential helper がない
@@ -259,7 +259,7 @@ sh test/run.sh
 コンテナを使った e2e テストもあります（Docker だけが必要）。イメージ自身を「GitHub」（SSH の git サーバー）とクライアントにも使い、本物の entrypoint・sshd・unlock を通して確認します。
 
 ```sh
-docker build -t git-push-gate:test .
+docker build --tag git-push-gate:test .
 sh test/e2e.sh
 ```
 
