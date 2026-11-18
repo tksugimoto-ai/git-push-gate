@@ -135,7 +135,7 @@ check "公開鍵を登録した後は、setup.sh で設定した devcontainer �
   'docker exec --user dev --workdir /home/dev/ws "$CONTAINER_PREFIX-dev" git push --quiet origin viasetup >"$WORK_DIR/out" 2>&1 && gh_has viasetup'
 check "setup.sh を 2 回実行しても、鍵を作り直さず（公開鍵のファイルがなくても）、設定も重複しない" \
   'docker exec --user dev "$CONTAINER_PREFIX-dev" rm /home/dev/.ssh/git-push-gate.pub &&
-   setup >"$WORK_DIR/out" 2>&1 && grep -qF "$client_public_key" "$WORK_DIR/out" &&
+   setup >"$WORK_DIR/out" 2>&1 && grep -qxF "$client_public_key" "$WORK_DIR/out" &&
    [ "$(docker exec --user dev "$CONTAINER_PREFIX-dev" grep -c git-push-gate.conf /home/dev/.ssh/config)" = 1 ]'
 check "setup.sh は不正なホスト鍵を拒否する" \
   '! docker exec --user dev --workdir /home/dev/ws "$CONTAINER_PREFIX-dev" sh /client/setup.sh gate 22 "ssh-rsa AAAA" >"$WORK_DIR/out" 2>&1'

@@ -31,7 +31,9 @@ mkdir --parents ~/.ssh
 if [ ! -s ~/.ssh/git-push-gate.pub ]; then
   public_key=$(ssh-keygen -y -f ~/.ssh/git-push-gate) && [ -n "$public_key" ] \
     || { echo "~/.ssh/git-push-gate を読めません。消してからやり直してください" >&2; exit 1; }
-  printf '%s git-push-gate-client\n' "$public_key" > ~/.ssh/git-push-gate.pub
+  # ssh-keygen -y はコメントも出すことがあるので、種類と鍵だけを取り、コメントを付け直す（ゲートはコメントを 1 つまでしか許さない）
+  set -- $public_key
+  printf '%s %s git-push-gate-client\n' "$1" "$2" > ~/.ssh/git-push-gate.pub
 fi
 printf 'git-push-gate %s %s\n' "$host_key_type" "$host_key_data" > ~/.ssh/git-push-gate_known_hosts
 # SSH エージェントは使わず（IdentityAgent none）、この鍵とホスト鍵だけを使う。
