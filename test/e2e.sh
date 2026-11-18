@@ -157,5 +157,21 @@ check "push した更新が記録されている" 'docker exec "$P-gate" grep -q
 check "鍵がエージェントに読み込まれている" \
   'docker exec "$P-gate" su -s /bin/sh git -c "SSH_AUTH_SOCK=/run/git-push-gate/agent.sock ssh-add -l" | grep -q gate-pp'
 
+# コンテナを再起動すると、またロックされる（ssh-agent はコンテナの中にあるため）
+docker restart "$P-gate" >/dev/null
+wait_ssh gate "$P-gate" >/dev/null
+check "再起動の後は、またロックされている" \
+  '! client "git switch -qc feat4 && $(commit f) && git push -q origin feat4" && grep -q ロックされています "$T/out" && ! gh_has feat4'
+# UNLOCK_LIFETIME が過ぎると、自動でロックされる
+start_gate github_key_pp -e UNLOCK_LIFETIME=20
+docker exec "$P-gate" sh -c 'printf "#!/bin/sh\necho secret\n" > /tmp/askpass && chmod 755 /tmp/askpass'
+check "UNLOCK_LIFETIME を短くして unlock" \
+  'docker exec -e SSH_ASKPASS=/tmp/askpass -e SSH_ASKPASS_REQUIRE=force "$P-gate" unlock >"$T/out" 2>&1'
+check "UNLOCK_LIFETIME の間は push できる" \
+  'client "git switch -qc feat5 && $(commit g) && git push -q origin feat5" && gh_has feat5'
+sleep 22
+check "UNLOCK_LIFETIME が過ぎると、またロックされる" \
+  '! client "git switch -qc feat6 && $(commit h) && git push -q origin feat6" && grep -q ロックされています "$T/out" && ! gh_has feat6'
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
