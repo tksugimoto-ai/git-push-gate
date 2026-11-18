@@ -13,9 +13,10 @@ CONFIG=/config          # github_key, client_keys.pub, known_hosts を置いた�
 REPO=/srv/git/repo.git  # root で操作できるよう、Dockerfile で safe.directory に登録してある
 g() { git --git-dir="$REPO" "$@"; }
 
-for f in github_key client_keys.pub known_hosts; do
+for f in github_key known_hosts; do
   [ -s "$CONFIG/$f" ] || die "$CONFIG/$f がありません"
 done
+[ -f "$CONFIG/client_keys.pub" ] || die "$CONFIG/client_keys.pub がありません（空のファイルでよい）"
 
 KEY=/home/git/.ssh/github_key
 AGENT_DIR=/run/git-push-gate
@@ -46,11 +47,16 @@ fi
 # クライアント（devcontainer）の公開鍵を、強制コマンド付きで登録
 keys=$(grep -Ev '^[[:space:]]*(#|$)' "$CONFIG/client_keys.pub" || true)
 # オプション（from= など）付きの行は、前に足すオプションと合わさって無効な鍵になるので拒否する
-[ -n "$keys" ] || die "$CONFIG/client_keys.pub に公開鍵がありません"
-if printf '%s\n' "$keys" | grep -Evq '^(ssh-|ecdsa-|sk-)'; then
+# 空でも起動する（devcontainer の client/setup.sh が鍵を作るには、先にゲートのホスト鍵が要るため）。誰も push できない
+[ -n "$keys" ] || echo "entrypoint: 警告: $CONFIG/client_keys.pub に公開鍵がないので、まだ誰も push できません" >&2
+if [ -n "$keys" ] && printf '%s\n' "$keys" | grep -Evq '^(ssh-|ecdsa-|sk-)'; then
   die "$CONFIG/client_keys.pub には、オプションなしの公開鍵だけを書いてください"
 fi
-printf '%s\n' "$keys" | sed 's|^|command="/usr/local/bin/git-push-gate",restrict |' > /home/git/.ssh/authorized_keys
+if [ -n "$keys" ]; then
+  printf '%s\n' "$keys" | sed 's|^|command="/usr/local/bin/git-push-gate",restrict |' > /home/git/.ssh/authorized_keys
+else
+  : > /home/git/.ssh/authorized_keys
+fi
 chown git:git /home/git/.ssh/authorized_keys && chmod 600 /home/git/.ssh/authorized_keys
 
 [ -d "$REPO" ] || git init -q --bare "$REPO"

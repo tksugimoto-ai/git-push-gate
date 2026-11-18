@@ -45,8 +45,7 @@ run 'ssh-keygen -q -t ed25519 -N "" -C gate -f /w/github_key_plain
      ssh-keygen -q -t ed25519 -N "" -C client -f /w/client/id_ed25519
      cat /w/github_key_plain.pub /w/github_key_pp.pub > /w/github/authorized_keys
      cp /w/client/id_ed25519.pub /w/github/client.pub
-     cp /w/client/id_ed25519.pub /w/config/client_keys.pub
-     cp /w/client/id_ed25519 /w/client_key && chmod 644 /w/client_key'   # attach.sh がホストから読む（テスト用に誰でも読める）
+     cp /w/client/id_ed25519.pub /w/config/client_keys.pub'
 
 # 「GitHub」: ネットワーク上の名前は github.com
 docker run -d --name "$P-github" --network "$NET" --network-alias github.com \
@@ -112,28 +111,27 @@ check "既定の bridge からゲートウェイ経由で push できる" 'RUN_N
     git init -q -b bridge /tmp/d && cd /tmp/d && $(commit x)
     GIT_SSH_COMMAND='"'"'$GSSH -o HostKeyAlias=gate'"'"' git push -q ssh://git@\$h:$PORT/repo.git bridge" >"$T/out" 2>&1 && gh_has bridge'
 
-# client/attach.sh: VS Code が作る devcontainer に見立てたコンテナの push 先をゲートに向ける
-mkdir -p "$T/ws"
-docker run -d --name "$P-dev" -v "$T/ws:/workspaces/ws" \
-  --label "devcontainer.local_folder=$T/ws" --label 'devcontainer.metadata=[{"remoteUser":"dev"}]' \
+# client/setup.sh: devcontainer に見立てたコンテナの中で実行し、push 先をゲートに向ける
+docker run -d --name "$P-dev" --network "$NET" -v "$ROOT/client:/client:ro" \
   --entrypoint sh "$IMAGE" -c 'adduser -D -u 1001 dev && sleep 1000000' >/dev/null
 until docker exec "$P-dev" id dev >/dev/null 2>&1; do sleep 1; done
-docker exec "$P-dev" sh -c "chown dev /workspaces/ws && su dev -c 'cd /workspaces/ws && git init -q -b attached &&
-  git remote add origin https://github.invalid/repo.git && $(commit x | sed 's/git commit/git -c user.name=t -c user.email=t@example.com commit/')'"
-check "attach.sh で設定した devcontainer から push できる" \
-  'GATE="$P-gate" CLIENT_KEY="$T/client_key" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
-   docker exec -u dev -w /workspaces/ws "$P-dev" git push -q origin attached >>"$T/out" 2>&1 && gh_has attached'
-check "attach.sh は 2 回実行しても設定が重複しない" \
-  'GATE="$P-gate" CLIENT_KEY="$T/client_key" sh "$ROOT/client/attach.sh" "$T/ws" >"$T/out" 2>&1 &&
+docker exec -u dev "$P-dev" sh -c "mkdir /home/dev/ws && cd /home/dev/ws && git init -q -b viasetup &&
+  git remote add origin https://github.invalid/repo.git && $(commit x | sed 's/git commit/git -c user.name=t -c user.email=t@example.com commit/')"
+hostkey=$(docker exec "$P-gate" cat /srv/git/ssh_host_keys/ssh_host_ed25519_key.pub)
+setup() { docker exec -u dev -w /home/dev/ws "$P-dev" sh /client/setup.sh gate 22 "$hostkey"; }
+check "setup.sh が公開鍵を表示する" 'setup >"$T/out" 2>&1 && grep -q "^ssh-ed25519 .* git-push-gate-client$" "$T/out"'
+pub=$(grep '^ssh-ed25519 .* git-push-gate-client$' "$T/out")
+check "公開鍵を登録する前は push できない" \
+  '! docker exec -u dev -w /home/dev/ws "$P-dev" git push -q origin viasetup >"$T/out" 2>&1 && ! gh_has viasetup'
+run "echo '$pub' >> /w/config/client_keys.pub"
+docker restart "$P-gate" >/dev/null; wait_ssh gate "$P-gate" >/dev/null
+check "公開鍵を登録した後は、setup.sh で設定した devcontainer から push できる" \
+  'docker exec -u dev -w /home/dev/ws "$P-dev" git push -q origin viasetup >"$T/out" 2>&1 && gh_has viasetup'
+check "setup.sh を 2 回実行しても、鍵を作り直さず、設定も重複しない" \
+  'setup >"$T/out" 2>&1 && grep -qF "$pub" "$T/out" &&
    [ "$(docker exec -u dev "$P-dev" grep -c git-push-gate.conf /home/dev/.ssh/config)" = 1 ]'
-docker rm -f "$P-dev" >/dev/null
-# SSH エージェントが転送されている devcontainer には、設定せずに止める
-mkdir -p "$T/ws2"
-docker run -d --name "$P-dev" -v "$T/ws2:/workspaces/ws2" -e SSH_AUTH_SOCK=/tmp/agent.sock \
-  --label "devcontainer.local_folder=$T/ws2" --entrypoint sleep "$IMAGE" 1000000 >/dev/null
-check "SSH エージェントが転送されていれば attach.sh は止まる" \
-  '! GATE="$P-gate" CLIENT_KEY="$T/client_key" sh "$ROOT/client/attach.sh" "$T/ws2" >"$T/out" 2>&1 && grep -q "SSH エージェントが転送" "$T/out" &&
-   ! docker exec "$P-dev" test -e /root/.ssh/git-push-gate'
+check "setup.sh は不正なホスト鍵を拒否する" \
+  '! docker exec -u dev -w /home/dev/ws "$P-dev" sh /client/setup.sh gate 22 "ssh-rsa AAAA" >"$T/out" 2>&1'
 docker rm -f "$P-dev" >/dev/null
 
 # --- パスフレーズ付きの鍵 ---

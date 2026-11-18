@@ -95,8 +95,8 @@ ssh-keygen -t ed25519 -C git-push-gate -f github_key
 ssh-keyscan -t ed25519 github.com > known_hosts
 ssh-keygen -lf known_hosts
 
-# devcontainer 側の公開鍵（複数行可。from= などのオプションは付けない）
-cp /path/to/devcontainer_key.pub client_keys.pub
+# devcontainer 側の公開鍵を書くファイル。最初は空でよい（下記 3. の setup.sh が表示する公開鍵を足す）
+touch client_keys.pub
 ```
 
 #### パスフレーズ
@@ -136,30 +136,34 @@ docker compose exec git-push-gate unlock
 | `/config` | `github_key`, `known_hosts`, `client_keys.pub`、パスフレーズ付きなら `github_key.pub`（読み取り専用で可）。クライアント用の秘密鍵は置かない |
 | `/srv/git` | 中継用の bare リポジトリと sshd のホスト鍵（ボリューム推奨） |
 
-### 3. devcontainer 側の remote を設定する
+### 3. devcontainer 側の push 先を設定する
 
-devcontainer に、クライアント用の秘密鍵（`client_keys.pub` に登録したものと対）と、ゲートのホスト鍵を置きます。どちらもワークスペースの外（`~/.ssh` など）に置いてください。ゲートのホスト鍵は、ホストで次のように取り出せます（`git-push-gate` は compose のサービス名）。
+devcontainer の中で [client/setup.sh](client/setup.sh)（30 行ほど）を実行します。ホストで実行するスクリプトはありません。setup.sh は次のことをします。書き込むのは `~/.ssh` と `.git/config` だけで、利用側のリポジトリにコミットされるものはありません。
 
-```sh
-docker compose exec git-push-gate cat /srv/git/ssh_host_keys/ssh_host_ed25519_key.pub | awk '{print "git-push-gate", $1, $2}'
-# → devcontainer の ~/.ssh/known_hosts に追記する
-```
+- クライアント用の鍵を devcontainer の中で作る（秘密鍵は外に出さない。すでにあれば作り直さない）
+- ゲートのホスト鍵を `~/.ssh/git-push-gate_known_hosts` に書き、`~/.ssh/config` に `Host git-push-gate` を足す（SSH エージェントは使わない設定）
+- `git remote set-url --push origin ssh://git@git-push-gate/repo.git`（fetch は今までどおり GitHub から）
+- 作った公開鍵を表示する
 
-ssh がこの鍵だけを使い、SSH エージェントを使わないよう、devcontainer の `~/.ssh/config` に書きます（[client/attach.sh](client/attach.sh) が書くものと同じ形です）。
+手順:
 
-```
-Host git-push-gate
-  User git
-  IdentityFile ~/.ssh/git-push-gate
-  IdentitiesOnly yes
-  IdentityAgent none
-  StrictHostKeyChecking yes
-```
+1. ホストで、ゲートのホスト鍵を表示します（ゲートの compose のディレクトリで）。
 
-```sh
-git remote set-url origin https://github.com/owner/repo.git     # fetch は GitHub から直接
-git remote set-url --push origin ssh://git@git-push-gate/repo.git
-```
+   ```sh
+   docker compose exec git-push-gate cat /srv/git/ssh_host_keys/ssh_host_ed25519_key.pub
+   ```
+
+2. devcontainer の中で、ワークスペースのディレクトリで setup.sh を実行します。setup.sh は、このリポジトリから内容を貼り付けるなどして持ち込みます（ワークスペースに置くならコミットしない）。ゲートのアドレスとポートは、compose 方式なら `git-push-gate` と `22`、ゲートを別に起動したなら下の表のとおりです。
+
+   ```sh
+   sh setup.sh git-push-gate 22 'ssh-ed25519 AAAA... git-push-gate'   # 1. で表示されたホスト鍵
+   ```
+
+   秘密の情報を使わないので、AI エージェントに頼んでもかまいません。例: 「client/setup.sh の内容で ~/setup.sh を作り、`sh ~/setup.sh git-push-gate 22 '<ホスト鍵>'` を実行して、表示された公開鍵を教えて」
+
+3. 表示された公開鍵を、ホストでゲートの `config/client_keys.pub` に足し、`docker compose restart` します（パスフレーズ付きの鍵なら、この後もう一度 `unlock`）。
+
+devcontainer をリビルドすると `~/.ssh` が消えるので、2. と 3. をやり直します（古い公開鍵は `client_keys.pub` から消してください）。ゲートのホスト鍵は `/srv/git` のボリュームに保存されるので、ゲートのコンテナを作り直しても変わりません。
 
 ### 利用側のリポジトリを変更せずに使う（compose を使わない devcontainer）
 
@@ -183,30 +187,14 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
 
    `0.0.0.0` には公開しないでください（LAN に公開されます）。Docker Desktop の経路は未検証です。
 
-   クライアント用の鍵は、compose.yaml と同じディレクトリに 1 つだけ作ります（devcontainer をリビルドしても作り直さない）。ゲートには要らないので、ゲートにマウントする `config/` の外に置きます。
+2. 上の「3. devcontainer 側の push 先を設定する」の手順で、devcontainer の中で setup.sh を実行します。ゲートのアドレスとポートは、表の「devcontainer から見たゲート」と、公開したポート（既定 `2222`）です。
 
    ```sh
-   ssh-keygen -t ed25519 -N '' -C git-push-gate-client -f client_key
-   cat client_key.pub >> config/client_keys.pub
-   docker compose restart   # パスフレーズ付きの鍵なら、この後もう一度 unlock する
+   sh setup.sh host.docker.internal 2222 'ssh-ed25519 AAAA... git-push-gate'   # Docker Desktop
+   sh setup.sh 172.17.0.1 2222 'ssh-ed25519 AAAA... git-push-gate'             # Linux の Docker Engine
    ```
 
-2. devcontainer を起動したら（リビルドのたびに）、ホストで、このリポジトリを clone したディレクトリから、ワークスペースのディレクトリを指定して [client/attach.sh](client/attach.sh) を実行します。
 
-   ```sh
-   sh client/attach.sh ~/src/REPO
-   ```
-
-   次を `docker exec` で devcontainer に設定します。どれも `~/.ssh` と `.git/config` に入るので、利用側のリポジトリにはコミットされません。
-
-   - クライアント用の鍵（ホストの `client_key` から渡す。別の場所なら環境変数 `CLIENT_KEY` で指定）
-   - ゲートのホスト鍵（ゲートから読むので、フィンガープリントの照合は不要）
-   - `~/.ssh/config` の `Host git-push-gate`（公開先が `127.0.0.1` なら `host.docker.internal`、それ以外はその IP）
-   - `git remote set-url --push origin ssh://git@git-push-gate/repo.git`
-
-   devcontainer から Docker を操作できる（`docker.sock`・`docker-host.sock`・`DOCKER_HOST`）か、SSH エージェントが転送されていれば、設定せずに止めます。ただし、これは実行した時点の devcontainer の中を見るだけの確認で、確実ではありません（エージェントはソケットの場所を変えられる）。「devcontainer 側で必要な設定」を守ることが前提です。最後にゲートへの接続を確かめ、VS Code の git credential helper が有効なら警告します。devcontainer やゲートが自動で見つからないときは、環境変数 `DEVCONTAINER`・`GATE` などで指定します（スクリプトの先頭を参照）。Windows では WSL のシェルから実行してください。
-
-ゲートのホスト鍵は `/srv/git` のボリュームに保存されるので、コンテナを作り直しても変わりません。
 
 ## devcontainer 側で必要な設定
 
@@ -228,6 +216,18 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
   - PR を作るなら **Pull requests: write**。PR のブランチを更新する API（`PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch`。base を head にマージする）は、GitHub のドキュメントでは Pull requests: write だけで呼べるように書かれているが、Contents: read の fine-grained PAT では「user doesn't have permission to update head repository」（403）で拒否されることを確かめた（2026-11、持ち主が書き込めるアカウントの PAT）。Contents: write を付けると、head が main の PR を作ってこれを呼ぶだけで main を書き換えられるので、付けないこと
   - **Actions: write は付けない**（`workflow_dispatch` や再実行で、保護ブランチのワークフローを動かせてしまう）
   - classic PAT の `repo` スコープは書き込みも含むので使わない
+
+### 確かめ方
+
+devcontainer を作ったら（リビルドのたびに）、devcontainer の中で次を実行し、**どれも失敗する（何も出ない）**ことを確かめてください。ゲートを通らずに GitHub に書き込める経路がないかの確認です。
+
+```sh
+ls -l /var/run/docker.sock /var/run/docker-host.sock 2>/dev/null; echo "DOCKER_HOST=${DOCKER_HOST:-}"   # Docker を操作できない
+echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-}"; ls /tmp/vscode-ssh-auth-*.sock 2>/dev/null                      # SSH エージェントがない
+ssh -T -o BatchMode=yes git@github.com                                                                     # GitHub に SSH で認証できない
+git config --get-all credential.helper                                                                     # VS Code の credential helper がない
+git push https://github.com/OWNER/REPO.git HEAD:refs/heads/bypass-test                                     # HTTPS で push できない
+```
 
 ## 限界
 
