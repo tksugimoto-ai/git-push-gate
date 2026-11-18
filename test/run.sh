@@ -252,6 +252,17 @@ if [ -n "$wt" ] && [ "$(git cat-file tree "$wt" | head -c 6)" = 100600 ]; then
   rt=$(git ls-tree origin/main | grep -v '	.github$' | { cat; printf '040000 tree %s\t.github\n' "$gt"; } | git mktree)
   expect ng "mode 100600 のワークフロー" origin "$(git commit-tree "$rt" -p origin/main -m mode):refs/heads/mode"
 else fail=$((fail+1)); echo "FAIL mode 100600 の木を作れませんでした"; fi
+expect ng "途中に /refs/ がある名前" origin u8:refs/heads/x/refs/heads/main
+expect ng "末尾が /HEAD の名前" origin u8:refs/heads/x/HEAD
+expect ng "ないブランチの削除" origin :refs/heads/nonexistent
+# 検査の途中でシグナルを受けたら、GitHub に push せずに拒否（検査の子プロセスが止まると、検査をすり抜けるため）
+mkfifo "$T/fifo"
+(cd "$T/gate.git" && GIT_DIR=. exec sh "$ROOT/hooks/pre-receive") <"$T/fifo" >"$T/out" 2>&1 & hp=$!
+exec 8>"$T/fifo"
+printf '%s %s refs/heads/sig\n' 0000000000000000000000000000000000000000 "$(git rev-parse origin/main)" >&8
+sleep 1; kill -TERM "$hp"; sleep 1; exec 8>&-
+if wait "$hp" || ! grep -q '中断されました' "$T/out" || gh_has sig
+then fail=$((fail+1)); echo "FAIL シグナルを受けたら push せずに拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   シグナルを受けたら push せずに拒否"; fi
 # 後から同じ名前のタグができたブランチは、更新はできないが、削除はできる
 ( cd "$T/seed" && git tag v7 origin/main && git push -q origin v7 )
 expect ng "タグと同じ名前になったブランチの更新" origin --force origin/main:refs/heads/v7

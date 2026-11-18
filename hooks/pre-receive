@@ -2,9 +2,13 @@
 # 受け取った更新を検査し、通ったものだけを GitHub に同期 push する。
 # GitHub 側で失敗したらこのフックも失敗するので、クライアントの push もエラーになる。
 set -euf   # -f: 保護ブランチ名をグロブ展開しない
-# 受け付けの時間切れなどでプロセスグループごとシグナルを受けても、フックは最後まで動いて結果を記録する
-# （'' で無視すると子プロセスにも引き継がれ、timeout で止められなくなるので、何もしないハンドラーにする）
-trap : TERM HUP PIPE
+# 受け付けの時間切れなどでプロセスグループごとシグナルを受けたら、GitHub に push する前なら拒否し、
+# push を始めた後なら最後まで動いて結果を記録する。シグナルで検査の子プロセス（grep や awk）が止まると、
+# 出力が空になって検査をすり抜けるので、印を付けておき、各 ref の検査の後と push の直前に確かめる
+# （シェルはシグナルの処理を、実行中のコマンドが終わってから行うので、検査中に受けたシグナルは必ず見つかる。
+# '' で無視すると子プロセスにも引き継がれ、timeout で止められなくなるので、印を付けるハンドラーにする）
+sig=""
+trap 'sig=1' TERM HUP PIPE
 zero=0000000000000000000000000000000000000000
 # 拒否も記録する（人間がいちばん知りたいのは、main やワークフローを変えようとした試み）
 # 記録でボリュームを埋められないよう、10MB を超えたら拒否は書かない（受け付けた更新は書く）
@@ -111,7 +115,8 @@ while IFS= read -r line; do
   # （git はコミット ID の大文字・小文字を区別しないので、大文字も）
   # - で始まる名前はオプションと取り違えられる。heads/main や tags/v1 は、短い名前で引くとブランチやタグに見える
   case "$(lower "$name")" in
-    head|refs/*|heads/*|tags/*|remotes/*|pull/*|-*) die "$ref は紛らわしい名前のため拒否" ;;
+    # 途中の /refs/ や末尾の /HEAD も、ls-remote などの末尾での一致で refs/heads/main や HEAD に見える
+    head|refs/*|heads/*|tags/*|remotes/*|pull/*|-*|*/refs/*|*/head) die "$ref は紛らわしい名前のため拒否" ;;
   esac
   ! hex40 "$(lower "$name")" || die "$ref は紛らわしい名前のため拒否"
   # 保護ブランチ（大文字・小文字だけが違う Main なども含む）
@@ -130,6 +135,8 @@ while IFS= read -r line; do
   expect=$(tip "$ref")
   [ "$old" = "${expect:-$zero}" ] || die "$ref は GitHub 側で更新されています。fetch してからやり直してください"
   if [ "$new" = "$zero" ]; then
+    # ないブランチの削除は、何もしないのに受け付けた記録が残る（上限のない記録を増やせる）ので拒否
+    [ -n "$expect" ] || die "$ref は GitHub にありません"
     spec=":$ref"                       # ブランチ削除
   else
     check_commit "$ref" "$new"
@@ -139,6 +146,7 @@ while IFS= read -r line; do
   set -- "$@" "--force-with-lease=$ref:$expect" "$spec"
   log="$log$(date -u +%Y-%m-%dT%H:%M:%SZ) $ref $old $new
 "
+  [ -z "$sig" ] || die "中断されました（シグナルを受けた）"
 done
 
 [ $# -eq 0 ] && exit 0
@@ -167,6 +175,7 @@ for t in $names; do
   ! printf '%s\n' "$remote" | awk -v r="refs/tags/$t" '$1 != "ref:" && $2 == r { f=1 } END { exit !f }' \
     || die "refs/heads/$t は GitHub にある同じ名前のタグと紛らわしいため拒否"
 done
+[ -z "$sig" ] || die "中断されました（シグナルを受けた）"
 timeout 300 git push --atomic --quiet upstream "$@" \
   || die "GitHub への push に失敗しました（時間切れを含む。時間切れのときは GitHub に反映されていることがあるので、fetch して確かめてください）"
 # 受け付けた更新の記録（人間が後で確かめられるように）。GitHub への push が成功したものだけ
