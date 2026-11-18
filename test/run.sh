@@ -263,6 +263,18 @@ printf '%s %s refs/heads/sig\n' 0000000000000000000000000000000000000000 "$(git 
 sleep 1; kill -TERM "$hp"; sleep 1; exec 8>&-
 if wait "$hp" || ! grep -q '中断されました' "$T/out" || gh_has sig
 then fail=$((fail+1)); echo "FAIL シグナルを受けたら push せずに拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   シグナルを受けたら push せずに拒否"; fi
+# 1 行も読まないうちにシグナルを受けても、成功で終わらない（read が途中で終わるため）
+mkfifo "$T/fifo2"
+(cd "$T/gate.git" && GIT_DIR=. exec sh "$ROOT/hooks/pre-receive") <"$T/fifo2" >"$T/out" 2>&1 & hp=$!
+exec 8>"$T/fifo2"; sleep 1; kill -TERM "$hp"; sleep 1; exec 8>&-
+if wait "$hp"; then fail=$((fail+1)); echo "FAIL read の最中のシグナルで成功にしない"; else pass=$((pass+1)); echo "ok   read の最中のシグナルで成功にしない"; fi
+# 検査に使う子プロセスが失敗しても、すり抜けない（Main を小文字にする tr だけが失敗して空になると、main と一致しない）
+mkdir -p "$T/shim"
+printf '#!/bin/sh\nin=$(cat); [ "$in" != Main ] || exit 1\nprintf %%s "$in" | exec %s "$@"\n' "$(command -v tr)" > "$T/shim/tr"
+chmod +x "$T/shim/tr"
+if printf '%s %s refs/heads/Main\n' 0000000000000000000000000000000000000000 "$(git rev-parse origin/main)" \
+   | (cd "$T/gate.git" && PATH="$T/shim:$PATH" GIT_DIR=. sh "$ROOT/hooks/pre-receive") >"$T/out" 2>&1 || gh_has Main
+then fail=$((fail+1)); echo "FAIL tr が失敗しても Main を拒否"; sed 's/^/     /' "$T/out"; else pass=$((pass+1)); echo "ok   tr が失敗しても Main を拒否"; fi
 # 後から同じ名前のタグができたブランチは、更新はできないが、削除はできる
 ( cd "$T/seed" && git tag v7 origin/main && git push -q origin v7 )
 expect ng "タグと同じ名前になったブランチの更新" origin --force origin/main:refs/heads/v7

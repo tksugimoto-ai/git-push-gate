@@ -2,11 +2,18 @@
 # 受け取った更新を検査し、通ったものだけを GitHub に同期 push する。
 # GitHub 側で失敗したらこのフックも失敗するので、クライアントの push もエラーになる。
 set -euf   # -f: 保護ブランチ名をグロブ展開しない
+# 検査は「成功したことを確かめる」形で書く。子プロセス（grep や tr など）がメモリ不足やシグナルで止まったときに、
+# 空の出力や失敗の終了コードを「一致しない」「項目なし」と取り違えて、検査をすり抜けないように。
+# そのため、できる比較はシェルの組み込み（case や変数の展開）だけで行う
+NL='
+'
 # 受け付けの時間切れなどでプロセスグループごとシグナルを受けたら、GitHub に push する前なら拒否し、
 # push を始めた後なら最後まで動いて結果を記録する。シグナルで検査の子プロセス（grep や awk）が止まると、
 # 出力が空になって検査をすり抜けるので、印を付けておき、各 ref の検査の後と push の直前に確かめる
 # （シェルはシグナルの処理を、実行中のコマンドが終わってから行うので、検査中に受けたシグナルは必ず見つかる。
-# '' で無視すると子プロセスにも引き継がれ、timeout で止められなくなるので、印を付けるハンドラーにする）
+# '' で無視すると子プロセスにも引き継がれ、timeout で止められなくなるので、印を付けるハンドラーにする。
+# なお、配布するイメージの busybox の timeout は receive-pack だけを止めるので、フックにはシグナルは届かず、
+# 入力が途中で切れるだけ。どちらの場合も、受け取った行はすべて検査してから push する）
 sig=""
 trap 'sig=1' TERM HUP PIPE
 zero=0000000000000000000000000000000000000000
@@ -33,8 +40,13 @@ set -- $PROTECTED
 [ "$(git config --bool --get receive.fsckObjects || true)" = true ] || die "receive.fsckObjects が有効ではありません"
 # 変な mode（40777 や 100600 など）は ls-tree が正規化して表示し、比較では同じに見えるので、fsck で拒否させる
 [ "$(git config --get receive.fsck.badFilemode || true)" = error ] || die "receive.fsck.badFilemode が error ではありません"
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-hex40() { printf '%s' "$1" | grep -Eqx '[0-9a-f]{40}'; }
+# 小文字にする。tr が止まると空になるので、長さが変わらないことを確かめる。$(...) の中で呼ぶので、呼び出し側でも || die する
+lower() {
+  l=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') && [ "${#l}" -eq "${#1}" ] || die "小文字に変換できません"
+  printf '%s' "$l"
+}
+hex40() { [ "${#1}" -eq 40 ] && case "$1" in *[!0-9a-f]*) false ;; esac; }
+LPROTECTED=$(lower "$PROTECTED") || die "小文字に変換できません"
 # 名前を間違えた保護ブランチは何も守らないので、GitHub にない保護ブランチがあれば受け付けない（直前に fetch 済み）
 for b in $PROTECTED; do
   [ -n "$(tip "refs/heads/$b")" ] || die "保護ブランチ $b が GitHub にありません。PROTECTED_BRANCHES を確認してください"
@@ -56,17 +68,29 @@ tree_ok() { # ディレクトリでないもの（シンボリックリンクな
   done
 }
 workflows() { git ls-tree -r "$1" -- "$WF/" || die "$1 のワークフローを読めません"; }   # パスは常に同じ規則で引用されるので、行どうしで比べてよい
+lines() { # lines 文字列 関数名: 文字列の各行（空行を除く）について関数を呼ぶ。偽を返したら、そこで偽を返す
+  set -- "$1$NL" "$2"
+  while [ -n "$1" ]; do
+    x=${1%%"$NL"*}; set -- "${1#*"$NL"}" "$2"
+    [ -z "$x" ] || "$2" "$x" || return 1
+  done
+}
+top_ok() { case "$1" in .github) ;; .[gG][iI][tT][hH][uU][bB]) return 1 ;; esac; }
+sub_ok() {
+  case "$1" in
+    .github/workflows|.github/actions) ;;
+    .github/[wW][oO][rR][kK][fF][lL][oO][wW][sS]|.github/[aA][cC][tT][iI][oO][nN][sS]) return 1 ;;
+  esac
+}
 case_ok() { # 大文字・小文字だけが違う .GITHUB や .github/Workflows は、取り違えのもとなので拒否
   r=$(git ls-tree --name-only "$1") || die "$1 を読めません"
-  [ "$(printf '%s\n' "$r" | grep -ix '\.github' || true)" = "$(printf '%s\n' "$r" | grep -x '\.github' || true)" ] || return 1
+  lines "$r" top_ok || return 1
   d=$(git ls-tree --name-only "$1" -- .github/) || die "$1 の .github を読めません"
-  [ "$(printf '%s\n' "$d" | grep -iEx '\.github/(workflows|actions)' || true)" = \
-    "$(printf '%s\n' "$d" | grep -Ex '\.github/(workflows|actions)' || true)" ]
+  lines "$d" sub_ok
 }
-subset() { # subset 行の一覧 許す行の一覧: 前者のすべての行が後者にあれば真
-  printf '%s\n' "$1" | grep . | while IFS= read -r line; do
-    printf '%s\n' "$2" | grep -Fqx -- "$line" || exit 1
-  done
+in_allowed() { case "$NL$allowed$NL" in *"$NL$1$NL"*) ;; *) return 1 ;; esac; }
+subset() { # subset 行の一覧 許す行の一覧: 前者のすべての行が後者にあれば真（grep を使わず、シェルだけで比べる）
+  allowed=$2; lines "$1" in_allowed
 }
 check_commit() { # check_commit ref new
   # ブランチにはコミットだけを置かせる（注釈付きタグのオブジェクトなども ls-tree は中を見てしまう）
@@ -114,15 +138,14 @@ while IFS= read -r line; do
   # 40 桁の 16 進数の名前は、push の指定でコミット ID と取り違えられる（検査したものと別のものが push される）
   # （git はコミット ID の大文字・小文字を区別しないので、大文字も）
   # - で始まる名前はオプションと取り違えられる。heads/main や tags/v1 は、短い名前で引くとブランチやタグに見える
-  case "$(lower "$name")" in
+  lname=$(lower "$name") || exit 1
+  case "$lname" in
     # 途中の /refs/ や末尾の /HEAD も、ls-remote などの末尾での一致で refs/heads/main や HEAD に見える
     head|refs/*|heads/*|tags/*|remotes/*|pull/*|-*|*/refs/*|*/head) die "$ref は紛らわしい名前のため拒否" ;;
   esac
-  ! hex40 "$(lower "$name")" || die "$ref は紛らわしい名前のため拒否"
+  if hex40 "$lname"; then die "$ref は紛らわしい名前のため拒否"; fi
   # 保護ブランチ（大文字・小文字だけが違う Main なども含む）
-  for b in $PROTECTED; do
-    [ "$(lower "$name")" != "$(lower "$b")" ] || die "$ref への push は禁止"
-  done
+  case " $LPROTECTED " in *" $lname "*) die "$ref への push は禁止" ;; esac
   # 許可する接頭辞（ALLOWED_BRANCH_PREFIXES）が設定されていれば、それ以外のブランチは作成・更新・削除させない
   if [ -n "$PREFIXES" ]; then
     okp=no
@@ -148,8 +171,10 @@ while IFS= read -r line; do
 "
   [ -z "$sig" ] || die "中断されました（シグナルを受けた）"
 done
-
-[ $# -eq 0 ] && exit 0
+# read の最中にシグナルを受けると、ループが途中で終わる
+[ -z "$sig" ] || die "中断されました（シグナルを受けた）"
+# receive-pack は更新がなければフックを呼ばないので、0 件は何かがおかしい（成功にすると、検査していない ref が手元に残る）
+[ $# -gt 0 ] || die "更新の指定がありません"
 # GitHub の今の状態を、push する直前に 1 回だけ確かめる。判定は受け付けの前に fetch した値で行ったので、
 # 保護ブランチがその値のままであることを確かめれば、データを送り終えるまで（最大 10 分）と判定の間に
 # 人間がワークフローを直した場合を、まとめて拒否できる。残る隙間は、この後の GitHub への push の間（最大 5 分）だけ。
@@ -158,13 +183,23 @@ done
 remote=$(timeout 60 git ls-remote --symref upstream HEAD \
   $(for b in $PROTECTED; do printf 'refs/heads/%s ' "$b"; done) $(for t in $names; do printf 'refs/tags/%s ' "$t"; done)) \
   || die "GitHub の状態を確かめられません"
+# ls-remote の出力は「oid<タブ>ref」の行（HEAD の向き先は「ref: refs/heads/main<タブ>HEAD」）。
+# ref は末尾の一致で余分に返ることがあるので、タブから行末までの完全一致で引く（awk などは使わない）
+TAB=$(printf '\t')
+remote_has() { case "$NL$remote$NL" in *"$TAB$1$NL"*) ;; *) return 1 ;; esac; }
+remote_oid() { # remote_oid ref: その ref の oid。なければ空
+  o=${NL}$remote$NL; o=${o%%"$TAB$1$NL"*}
+  [ "$o" != "$NL$remote$NL" ] || return 0
+  printf '%s' "${o##*"$NL"}"
+}
 for b in $PROTECTED; do
-  [ "$(printf '%s\n' "$remote" | awk -v r="refs/heads/$b" '$1 != "ref:" && $2 == r { print $1 }')" = "$(tip "refs/heads/$b")" ] \
-    || die "保護ブランチ $b が、受け付けを始めた後に GitHub で更新されました。やり直してください"
+  ro=$(remote_oid "refs/heads/$b"); lo=$(tip "refs/heads/$b")
+  hex40 "$ro" && [ "$ro" = "$lo" ] || die "保護ブランチ $b が、受け付けを始めた後に GitHub で更新されました。やり直してください"
 done
 # デフォルトブランチ（master や trunk のこともある）が保護されていなければ受け付けない
-default=$(printf '%s\n' "$remote" | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2 }')
-[ -n "$default" ] || die "GitHub のデフォルトブランチを確かめられません"
+default=$(remote_oid HEAD)   # HEAD の行は 2 つ（向き先と oid）あるので、最初の「ref: refs/heads/…」を取る
+default=${default#ref: refs/heads/}
+case "$default" in ''|ref:*|*[!A-Za-z0-9._/-]*) die "GitHub のデフォルトブランチを確かめられません" ;; esac
 case " $PROTECTED " in
   *" $default "*) ;;
   *) die "デフォルトブランチ $default が PROTECTED_BRANCHES に入っていません" ;;
@@ -172,8 +207,7 @@ esac
 # GitHub にある同じ名前のタグ（v1.2.3 など）。短い名前で引くツール（git clone --branch、uses: owner/repo@v1 など）が
 # ブランチの方を取ることがある
 for t in $names; do
-  ! printf '%s\n' "$remote" | awk -v r="refs/tags/$t" '$1 != "ref:" && $2 == r { f=1 } END { exit !f }' \
-    || die "refs/heads/$t は GitHub にある同じ名前のタグと紛らわしいため拒否"
+  if remote_has "refs/tags/$t"; then die "refs/heads/$t は GitHub にある同じ名前のタグと紛らわしいため拒否"; fi
 done
 [ -z "$sig" ] || die "中断されました（シグナルを受けた）"
 timeout 300 git push --atomic --quiet upstream "$@" \
