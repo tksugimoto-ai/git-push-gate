@@ -1,0 +1,29 @@
+# ゲートを単独で起動する compose（devcontainer の compose に入れるときは examples/compose.yaml を参照）。
+# このリポジトリを、ワークスペース（devcontainer にマウントされるディレクトリ）の外に clone し、そのディレクトリで:
+#   cp .env.example .env    # エディタで UPSTREAM などを書く
+#   config/ に github_key・known_hosts・client_keys.pub を置く（README の「1. 鍵とホスト鍵を用意する」）
+#   docker compose up --detach
+# .env と config/ は .gitignore と .dockerignore に入れてある（コミットもイメージへの取り込みもされない）。
+# このファイルは書き換えずに、設定はすべて .env に書く。
+services:
+  git-push-gate:
+    # clone したこのディレクトリからビルドする。git pull したら、差分を読んでから docker compose up --detach --build する
+    build: .
+    restart: unless-stopped
+    environment:
+      UPSTREAM: ${UPSTREAM:?.env に UPSTREAM=git@github.com:OWNER/REPO.git のように書いてください}
+      PROTECTED_BRANCHES: ${PROTECTED_BRANCHES:-}
+      UNLOCK_LIFETIME: ${UNLOCK_LIFETIME:-}
+      MAX_PUSH_SIZE: ${MAX_PUSH_SIZE:-}
+      ALLOWED_BRANCH_PREFIXES: ${ALLOWED_BRANCH_PREFIXES:-}
+    # 使えるメモリの上限（エージェントが大きなデータを送って、ホストのメモリを使い切らないように）
+    mem_limit: ${MEM_LIMIT:-2g}
+    ports:
+      # 0.0.0.0 にはしないこと（LAN に公開される）。公開先は .env の GATE_BIND で変える
+      - "${GATE_BIND:-127.0.0.1}:${GATE_PORT:-2222}:22"
+    volumes:
+      - ./config:/config:ro
+      - data:/srv/git
+
+volumes:
+  data:
