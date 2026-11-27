@@ -2,6 +2,7 @@
 # authorized_keys の command= から呼ばれる。許可するのは push（git-receive-pack）だけ。
 # SSH_ORIGINAL_COMMAND 以外の環境変数はクライアントから渡せない（sshd の AcceptEnv 既定値）。
 set -eu
+export GIT_TERMINAL_PROMPT=0   # 認証に失敗しても、端末で入力を求めない（HTTPS のとき）
 # オプションはなるべく長い形で書く（短い形のままのものは、busybox や git に長い形がないもの）
 # GIT_PUSH_GATE_REPO はテスト用。sshd から呼ばれたとき（SSH_CONNECTION がある）は使わない
 if [ -n "${SSH_CONNECTION:-}" ]; then REPO=/srv/git/repo.git; else REPO="${GIT_PUSH_GATE_REPO:-/srv/git/repo.git}"; fi

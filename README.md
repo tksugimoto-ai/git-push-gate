@@ -28,10 +28,10 @@ GitHub の Rulesets やブランチ保護が使えない環境（プランの制
 ```
 devcontainer (エージェント)                git-push-gate コンテナ                    GitHub
   fetch ───────────────────────────────────────────────────────────────────────▶  (読み取り専用トークン)
-  push ──SSH (コンテナ間専用の鍵)──▶  sshd → git-push-gate → pre-receive ──SSH──▶  (GitHub 用の鍵はここだけ)
+  push ──SSH (コンテナ間専用の鍵)──▶  sshd → git-push-gate → pre-receive ──SSH か HTTPS──▶  (GitHub 用の鍵か PAT はここだけ)
 ```
 
-- GitHub に書き込める鍵は git-push-gate コンテナだけが持ち、エージェントの環境には置きません。
+- GitHub に書き込める鍵（または PAT）は git-push-gate コンテナだけが持ち、エージェントの環境には置きません。
 - エージェントの SSH 鍵は `authorized_keys` の強制コマンドで `git-push-gate` に固定され、push（`git-receive-pack`）以外は実行できません。
 - push を受け付ける前に GitHub の最新状態を fetch するので、fast-forward の判定は GitHub と一致します。
 - `pre-receive` フックが検査し、通った更新だけをその場で GitHub に push します（`--atomic` と `--force-with-lease`）。lease には、クライアントが送ってきた値ではなく、直前に fetch した GitHub の値を使います。GitHub 側で失敗すればエージェントの push も失敗します。
@@ -116,8 +116,26 @@ docker compose exec git-push-gate unlock
 | Deploy key（書き込み可） | 対象リポジトリだけ | リポジトリの管理者権限が必要 |
 | マシンユーザーの SSH 鍵 | 招待されたリポジトリだけ | アカウントの作成と招待が必要 |
 | 自分のアカウントに専用の鍵を追加 | 自分が書き込めるすべてのリポジトリ | 鍵を登録するだけ |
+| fine-grained PAT（下記「[PAT を使う](#pat-を使うhttps)」） | 選んだリポジトリだけ | 管理者権限は要らない。ただし、自分のリポジトリか、PAT を許可した organization のリポジトリに限る（他人の個人アカウントのリポジトリには、招待されていても使えない） |
 
 自分のアカウントの鍵でも、ホストにはもともと同じ範囲の認証情報（普段の push に使っているもの）があり、エージェントからは読めない場所に置くので、増えるリスクは「ホスト上の鍵ファイルが 1 つ増える」ことです。既存の鍵は使い回さず、漏れたときにそれだけ取り消せる専用の鍵にしてください。
+
+#### PAT を使う（HTTPS）
+
+SSH 鍵の代わりに、fine-grained PAT で GitHub に接続することもできます。`github_key` と `known_hosts` の代わりに、トークンを 1 行だけ書いた `github_token` を設定ディレクトリに置き、`UPSTREAM` を `https://github.com/owner/repo.git` の形にします（`github_key` と `github_token` の両方があると起動しません）。
+
+- PAT は、Repository access で対象のリポジトリだけを選び、Repository permissions は **Contents: Read and write** だけにする（Metadata: Read は自動で付く）。**Workflows は付けない**（ゲートはワークフローの変更を拒否するので要らない。付けると、漏れたときにワークフローを書き換えられる）
+- 期限を付けられる。切れたら新しいトークンに書き換えて、ゲートを再起動する
+- トークンはファイルから読んで git に渡し、URL やコマンドラインには書かないので、記録や `ps` には出ません。`UPSTREAM` にユーザー名やトークンを書くと起動しません
+- パスフレーズで守る仕組み（`unlock`）はありません。守りは、エージェントから読めない場所に置くことで、パスフレーズなしの SSH 鍵と同じです
+- 未確認: Workflows の権限がない PAT では、GitHub は `.github/workflows` を変えるコミットを含む push を拒否します。ゲートはブランチの先端のワークフローが保護ブランチと同じであることしか見ないので、途中のコミットでワークフローが変わっている push（例: 新しくなった main をブランチにマージしたもの）が、GitHub に拒否されることがあるかもしれません。拒否されたら、main に rebase してください
+
+```sh
+cd "$gate_dir"
+printf '%s\n' 'github_pat_…' > github_token   # エディタで書いてもよい。シェルの履歴に残さないなら、エディタで
+chmod 600 github_token
+touch client_keys.pub
+```
 
 ### 2. compose に追加する
 
@@ -125,7 +143,7 @@ docker compose exec git-push-gate unlock
 
 | 環境変数 | 説明 |
 |---|---|
-| `UPSTREAM` | 必須。例: `git@github.com:owner/repo.git` |
+| `UPSTREAM` | 必須。例: `git@github.com:owner/repo.git`（PAT なら `https://github.com/owner/repo.git`） |
 | `PROTECTED_BRANCHES` | 保護するブランチ（空白区切り、完全一致。`release/*` のようなパターンは使えない）。すべて GitHub に存在し、デフォルトブランチを含むこと（そうでないと push を受け付けない）。既定 `main develop` |
 | `UNLOCK_LIFETIME` | パスフレーズ付きの鍵を解除しておく時間（例: `8h`）。既定は無期限。コンテナを再起動すると（`docker compose restart` を含む）、鍵はロックされ直すので、もう一度 `unlock` が必要 |
 | `ALLOWED_BRANCH_PREFIXES` | 設定すると、この接頭辞（空白区切り。例: `agent/ claude/`）で始まるブランチしか作成・更新・削除させない。人間のブランチを強制 push・削除させない、`gh-pages` やワークフローの `branches:` に合う名前を作らせない、のに使う。既定は制限なし |
@@ -133,7 +151,7 @@ docker compose exec git-push-gate unlock
 
 | マウント先 | 内容 |
 |---|---|
-| `/config` | `github_key`, `known_hosts`, `client_keys.pub`、パスフレーズ付きなら `github_key.pub`（読み取り専用で可）。クライアント用の秘密鍵は置かない |
+| `/config` | `github_key`, `known_hosts`, `client_keys.pub`、パスフレーズ付きなら `github_key.pub`（PAT なら `github_key` と `known_hosts` の代わりに `github_token`）。読み取り専用で可。クライアント用の秘密鍵は置かない |
 | `/srv/git` | 中継用の bare リポジトリと sshd のホスト鍵（ボリューム推奨） |
 
 ### 3. devcontainer 側の push 先を設定する
@@ -334,7 +352,7 @@ Docker なしで動く結合テストがあります（git、util-linux の floc
 sh test/run.sh
 ```
 
-コンテナを使った e2e テストもあります（Docker だけが必要）。イメージ自身を「GitHub」（SSH の git サーバー）とクライアントにも使い、本物の entrypoint・sshd・unlock を通して確認します。
+コンテナを使った e2e テストもあります（Docker と、「GitHub」役のイメージを作るためのネットワークが必要）。イメージ自身を「GitHub」（SSH と HTTPS の git サーバー。HTTPS 用に lighttpd などを足したもの）とクライアントにも使い、本物の entrypoint・sshd・unlock を通して確認します。
 
 ```sh
 docker build --tag git-push-gate:test .
