@@ -22,10 +22,15 @@ if [ -e "$CONFIG_DIR/github_token" ] && [ -e "$CONFIG_DIR/github_key" ]; then
   fail "$CONFIG_DIR に github_key と github_token の両方があります（どちらか一方にしてください）"
 fi
 if [ -e "$CONFIG_DIR/github_token" ]; then auth_method=token; else auth_method=key; fi
-# UPSTREAM の形も、接続のしかたに合っていることを確かめる（取り違えて、意図しない認証情報で接続しないように）
+# UPSTREAM は 1 行だけ（grep は行ごとに調べるので、正しい行を足した複数行がすり抜けないように）
+NEWLINE='
+'
+case "$UPSTREAM" in *"$NEWLINE"*) fail "UPSTREAM に改行があります" ;; esac
+# UPSTREAM の形も、接続のしかたに合っていることを確かめる（取り違えて、意図しない認証情報で接続しないように）。
+# PAT のときのエラーには UPSTREAM を表示しない（トークンが書かれていると、ログに残るため）
 case "$auth_method:$UPSTREAM" in
   token:https://*) ;;
-  token:*) fail "github_token を使うときは、UPSTREAM を https://github.com/owner/repo.git の形にしてください: $UPSTREAM" ;;
+  token:*) fail "github_token を使うときは、UPSTREAM を https://github.com/owner/repo.git の形にしてください" ;;
   key:http://*|key:https://*) fail "UPSTREAM が HTTPS です。SSH 鍵なら git@github.com:owner/repo.git の形に、PAT なら $CONFIG_DIR/github_token を置いてください" ;;
 esac
 
@@ -37,12 +42,12 @@ ssh_command=""
 if [ "$auth_method" = token ]; then
   # URL にはホスト名・ポート・パスだけを許す（ユーザー名やトークンを URL に書くと、記録やエラーに出る）
   printf '%s\n' "$UPSTREAM" | grep -Exq 'https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+' \
-    || fail "UPSTREAM には https://ホスト名/owner/repo.git の形だけを書いてください（ユーザー名やトークンは入れない）: $UPSTREAM"
+    || fail "UPSTREAM には https://ホスト名/owner/repo.git の形だけを書いてください（ユーザー名やトークンは入れない）"
   upstream_origin=$(printf '%s\n' "$UPSTREAM" | sed 's|^\(https://[^/]*\)/.*|\1|')
   # トークンは 1 行で、GitHub のトークンに使われる文字（英数字と _）だけ。credential helper の出力に、別の行を紛れ込ませないように
   github_token=$(cat "$CONFIG_DIR/github_token")
   case "$github_token" in
-    ''|*[!A-Za-z0-9_]*) fail "$CONFIG_DIR/github_token には、トークンを 1 行だけ書いてください（英数字と _ のみ。前後の空白や空行も不可）" ;;
+    ''|*[!A-Za-z0-9_]*) fail "$CONFIG_DIR/github_token には、トークンを 1 行だけ書いてください（英数字と _ のみ。前後に空白を付けない）" ;;
   esac
   [ "${#github_token}" -ge 20 ] || fail "$CONFIG_DIR/github_token が短すぎます（トークンを書いてください）"
   install --owner git --group git --mode 600 /dev/null "$GITHUB_TOKEN_FILE"
@@ -118,9 +123,8 @@ if [ "$auth_method" = token ]; then
   # UPSTREAM のホストにだけ渡す
   gate_git config "credential.$upstream_origin.helper" \
     "!f() { [ \"\$1\" = get ] || exit 0; echo username=x-access-token; printf 'password=%s\\n' \"\$(cat $GITHUB_TOKEN_FILE)\"; }; f"
-  # 止まった接続が後の push をすべて待たせないよう、60 秒間ほとんど進まなければ打ち切る
-  gate_git config http.lowSpeedLimit 1000
-  gate_git config http.lowSpeedTime 60
+  # 止まった接続は、fetch・ls-remote・push のそれぞれの時間の上限（timeout）で打ち切る。
+  # http.lowSpeedLimit は使わない（GitHub が大きな push を処理している間の、通信の少ない時間で打ち切ってしまう）
 else
   gate_git config core.sshCommand "$ssh_command"
 fi
