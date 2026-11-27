@@ -201,7 +201,7 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
    | Docker Desktop（Mac / Windows。WSL2 バックエンドを含む） | `127.0.0.1`（既定） | `host.docker.internal` |
    | Linux・WSL に直接入れた Docker Engine | docker0 の IP（多くは `172.17.0.1`） | デフォルトゲートウェイ（docker0 の IP） |
 
-   `0.0.0.0` には公開しないでください（LAN に公開されます）。Docker Desktop の経路は未検証です。
+   `0.0.0.0` には公開しないでください（LAN に公開されます）。Docker Desktop の経路は、Windows の Docker Desktop（WSL2 のバックエンド）で確認済みです（2026-11）。Mac は未確認です。
 
 2. 上の「3. devcontainer 側の push 先を設定する」の手順で、devcontainer の中で setup.sh を実行します。ゲートのアドレスとポートは、表の「devcontainer から見たゲート」と、公開したポート（既定 `2222`）です。
 
