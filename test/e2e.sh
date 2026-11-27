@@ -4,6 +4,7 @@
 #   docker build --tag git-push-gate:test . && sh test/e2e.sh
 set -eu
 IMAGE="${IMAGE:-git-push-gate:test}"
+GITHUB_IMAGE="$IMAGE-https-github"   # 「GitHub」役。HTTPS でも公開するため、lighttpd などを足したもの
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 CONTAINER_PREFIX="gpg-e2e-$$"            # コンテナ名・ネットワーク名の接頭辞
 WORK_DIR=$(mktemp -d)   # ホストで動く部分は、macOS でも動くよう短い形のオプションにする
@@ -38,8 +39,11 @@ check() { # check 説明 条件（$WORK_DIR/out に出力を書くと、失敗�
   else fail=$((fail+1)); echo "FAIL $1"; sed 's/^/     /' "$WORK_DIR/out"; fi
 }
 
+# プロキシ経由でしか外に出られない環境では、ビルドにもプロキシを渡す
+docker build --quiet ${HTTPS_PROXY:+--network host --build-arg HTTPS_PROXY="$HTTPS_PROXY" --build-arg https_proxy="$HTTPS_PROXY"} \
+  --build-arg IMAGE="$IMAGE" --tag "$GITHUB_IMAGE" "$ROOT/test/https-github" >/dev/null
 docker network create "$NETWORK" >/dev/null
-mkdir -p "$WORK_DIR/config" "$WORK_DIR/client" "$WORK_DIR/github"
+mkdir -p "$WORK_DIR/config" "$WORK_DIR/client" "$WORK_DIR/github/tls"
 cp "$ROOT/test/e2e-github.sh" "$WORK_DIR/github/start.sh"
 
 # 鍵: GitHub 用（パスフレーズなし・付き）、クライアント用
@@ -50,9 +54,18 @@ run 'ssh-keygen -q -t ed25519 -N "" -C gate -f /w/github_key_plain
      cp /w/client/id_ed25519.pub /w/github/client.pub
      cp /w/client/id_ed25519.pub /w/config/client_keys.pub'
 
+# 「GitHub」の HTTPS の証明書と、PAT（Basic 認証のパスワード）
+GITHUB_TOKEN=github_pat_e2eTEST0123456789abcdefghijklmnop
+docker run --rm --volume "$WORK_DIR:/w" --entrypoint sh "$GITHUB_IMAGE" -c "set -e
+  openssl req -x509 -newkey ed25519 -nodes -days 1 -subj /CN=github.com -addext subjectAltName=DNS:github.com \
+    -keyout /w/github/tls/key.pem -out /w/github/tls/cert.pem 2>/dev/null
+  cat /w/github/tls/key.pem /w/github/tls/cert.pem > /w/github/tls/server.pem
+  echo x-access-token:$GITHUB_TOKEN > /w/github/tls/users
+  chmod 644 /w/github/tls/*"
+
 # 「GitHub」: ネットワーク上の名前は github.com
 docker run --detach --name "$CONTAINER_PREFIX-github" --network "$NETWORK" --network-alias github.com \
-  --volume "$WORK_DIR/github:/github:ro" --entrypoint sh "$IMAGE" /github/start.sh >/dev/null
+  --volume "$WORK_DIR/github:/github:ro" --entrypoint sh "$GITHUB_IMAGE" /github/start.sh >/dev/null
 
 wait_ssh() { # wait_ssh ホスト名 コンテナ → known_hosts の行を出力
   run "for i in \$(seq 30); do ssh-keyscan -t ed25519 $1 2>/dev/null | grep . && exit 0; sleep 1; done; exit 1" \
@@ -191,8 +204,71 @@ docker start "$CONTAINER_PREFIX-gate" >/dev/null; wait_ssh gate "$CONTAINER_PREF
 check "起動時に、登録したクライアントの鍵のフィンガープリントを出す" \
   'docker logs "$CONTAINER_PREFIX-gate" 2>&1 | grep -q "SHA256:.*git-push-gate-client"'
 
+# --- PAT（HTTPS） ---
+# start_gate_token トークン [追加の docker run 引数...]（「GitHub」の証明書を、ゲートが信頼する CA として差し込む）
+start_gate_token() {
+  token=$1; shift
+  docker rm --force "$CONTAINER_PREFIX-gate" >/dev/null 2>&1 || true
+  run "rm -f /w/config/github_key /w/config/github_key.pub && printf '%s\\n' '$token' > /w/config/github_token"
+  docker run --detach --name "$CONTAINER_PREFIX-gate" --network "$NETWORK" --network-alias gate \
+    --env UPSTREAM=https://github.com/git/repo.git --volume "$WORK_DIR/config:/config:ro" --volume "$CONTAINER_PREFIX-data:/srv/git" \
+    --volume "$WORK_DIR/github/tls/cert.pem:/etc/ssl/certs/ca-certificates.crt:ro" "$@" "$IMAGE" >/dev/null
+}
+gate_stopped() { # gate_stopped ログに出るはずの文字列（止まるまで最大 30 秒待つ）
+  for i in $(seq 30); do
+    [ "$(docker inspect --format "{{.State.Running}}" "$CONTAINER_PREFIX-gate")" = false ] && break; sleep 1
+  done
+  [ "$(docker inspect --format "{{.State.Running}}" "$CONTAINER_PREFIX-gate")" = false ] && docker logs "$CONTAINER_PREFIX-gate" 2>&1 | grep -q "$1"
+}
+credential_fill() { # credential_fill ホスト → ゲートの git が、そのホストに渡す認証情報を出力する
+  docker exec "$CONTAINER_PREFIX-gate" sh -c "printf 'protocol=https\\nhost=%s\\n' '$1' | su -s /bin/sh git -c 'git --git-dir=/srv/git/repo.git credential fill'" 2>&1
+}
+docker exec "$CONTAINER_PREFIX-github" git --git-dir=/home/git/repo.git branch frompat main
+start_gate_token "$GITHUB_TOKEN"
+wait_ssh gate "$CONTAINER_PREFIX-gate" > "$WORK_DIR/client/known_hosts_gate"
+check "PAT: 起動時に GitHub を HTTPS で fetch している" 'gate_has frompat'
+check "PAT: feature ブランチの push が GitHub に届く" \
+  'client "git switch --quiet --create featpat && $(commit p) && git push --quiet origin featpat" && gh_has featpat && ! grep -q "$GITHUB_TOKEN" "$WORK_DIR/out"'
+check "PAT: main への push は拒否" \
+  '! client "$(commit q) && git push --quiet origin HEAD:main" && grep -q git-push-gate: "$WORK_DIR/out" && ! grep -q "$GITHUB_TOKEN" "$WORK_DIR/out"'
+check "PAT: トークンは UPSTREAM のホストにだけ渡す" \
+  'credential_fill github.com | grep -qx "password=$GITHUB_TOKEN" &&
+   ! credential_fill github.com.evil.example | grep -q "$GITHUB_TOKEN" && ! credential_fill evil.example | grep -q "$GITHUB_TOKEN"'
+check "PAT: トークンはログにも記録にも出ない" \
+  '! docker logs "$CONTAINER_PREFIX-gate" 2>&1 | grep -q "$GITHUB_TOKEN" && ! docker exec "$CONTAINER_PREFIX-gate" grep -q "$GITHUB_TOKEN" /srv/git/repo.git/push-gate.log /srv/git/repo.git/config'
+check "PAT: unlock は不要と案内する" \
+  'docker exec "$CONTAINER_PREFIX-gate" unlock >"$WORK_DIR/out" 2>&1 && grep -q 不要 "$WORK_DIR/out"'
+start_gate_token github_pat_wrong0123456789abcdefghijklmn
+wait_ssh gate "$CONTAINER_PREFIX-gate" >/dev/null
+check "PAT: トークンが違えば、起動時に警告し、push も GitHub に届かない" \
+  'docker logs "$CONTAINER_PREFIX-gate" 2>&1 | grep -q "fetch できません" &&
+   ! client "git switch --quiet --create featpat2 && $(commit r) && git push --quiet origin featpat2" && ! gh_has featpat2'
+start_gate_token "$GITHUB_TOKEN x"
+check "PAT: トークンに空白などがあれば起動しない" 'gate_stopped "トークンを 1 行だけ"'
+start_gate_token "$GITHUB_TOKEN" --env UPSTREAM=git@github.com:repo.git
+check "PAT: UPSTREAM が SSH の形なら起動しない" 'gate_stopped "https://github.com/owner/repo.git の形"'
+start_gate_token "$GITHUB_TOKEN" --env UPSTREAM=https://x-access-token:secret@github.com/git/repo.git
+check "PAT: UPSTREAM にユーザー名やトークンがあれば起動せず、ログにも出さない" \
+  'gate_stopped "ユーザー名やトークンは入れない" && ! docker logs "$CONTAINER_PREFIX-gate" 2>&1 | grep -q secret'
+start_gate_token "$GITHUB_TOKEN" --env "UPSTREAM=https://x-access-token:secret@evil.example/x
+https://github.com/git/repo.git"
+check "PAT: 複数行の UPSTREAM は起動せず、ログにも出さない" \
+  'gate_stopped "UPSTREAM に改行があります" && ! docker logs "$CONTAINER_PREFIX-gate" 2>&1 | grep -q secret'
+start_gate_token "$GITHUB_TOKEN"
+run "cp /w/github_key_plain /w/config/github_key"
+docker restart "$CONTAINER_PREFIX-gate" >/dev/null 2>&1 || true
+check "github_key と github_token の両方があれば起動しない" 'gate_stopped "両方があります"'
+run "rm -f /w/config/github_token"
+start_gate_token "" --env UPSTREAM=https://github.com/git/repo.git
+run "rm -f /w/config/github_token && cp /w/github_key_plain /w/config/github_key"
+docker restart "$CONTAINER_PREFIX-gate" >/dev/null 2>&1 || true
+check "SSH 鍵で UPSTREAM が HTTPS なら起動しない" 'gate_stopped "UPSTREAM が HTTPS です"'
+
 # --- パスフレーズ付きの鍵 ---
 start_gate github_key_pp --env UNLOCK_LIFETIME=1h
+check "PAT から SSH 鍵に切り替えると、PAT の設定は残らない" \
+  '! docker exec "$CONTAINER_PREFIX-gate" git --git-dir=/srv/git/repo.git config --get-regexp "^(credential|http)\\." >"$WORK_DIR/out" 2>&1 &&
+   docker exec "$CONTAINER_PREFIX-gate" git --git-dir=/srv/git/repo.git config --get core.sshCommand >/dev/null'
 # ゲートの起動後に「GitHub」だけにブランチを作る（unlock の後の fetch で入るはず）
 docker exec "$CONTAINER_PREFIX-github" git --git-dir=/home/git/repo.git branch fromgh main
 check "unlock の前はまだ fetch していない" '! gate_has fromgh'

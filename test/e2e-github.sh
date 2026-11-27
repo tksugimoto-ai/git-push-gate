@@ -18,5 +18,26 @@ git -C "$SEED_DIR" -c user.name=t -c user.email=t@example.com commit --quiet --m
 git -C "$SEED_DIR" push --quiet "$BARE_REPO" main main:develop
 chown --recursive git:git "$BARE_REPO"
 
+# HTTPS（git の smart HTTP、Basic 認証）でも公開する。PAT で接続するゲートの確認用（URL は https://github.com/git/repo.git）
+if [ -s /github/tls/server.pem ]; then
+  cat > /etc/lighttpd/git.conf <<'EOF'
+server.modules = ("mod_openssl", "mod_auth", "mod_authn_file", "mod_alias", "mod_setenv", "mod_cgi")
+server.port = 443
+server.username = "git"
+server.groupname = "git"
+server.document-root = "/var/empty"
+ssl.engine = "enable"
+ssl.pemfile = "/github/tls/server.pem"
+auth.backend = "plain"
+auth.backend.plain.userfile = "/github/tls/users"
+auth.require = ("/git/" => ("method" => "basic", "realm" => "git", "require" => "valid-user"))
+alias.url = ("/git" => "/usr/libexec/git-core/git-http-backend")
+cgi.assign = ("/git-http-backend" => "")
+setenv.add-environment = ("GIT_PROJECT_ROOT" => "/home/git", "GIT_HTTP_EXPORT_ALL" => "1")
+EOF
+  mkdir --parents /var/empty
+  lighttpd -f /etc/lighttpd/git.conf
+fi
+
 ssh-keygen -A >/dev/null
 exec /usr/sbin/sshd -D -e

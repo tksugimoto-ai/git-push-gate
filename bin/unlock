@@ -2,10 +2,11 @@
 # ホストから実行する: docker compose exec git-push-gate unlock
 # パスフレーズ付きの GitHub 用の鍵を、コンテナ内の ssh-agent に読み込ませる（コンテナを止めるまで有効）。
 set -eu
+export GIT_TERMINAL_PROMPT=0
 # オプションはなるべく長い形で書く（su・ssh-add・rm などの短い形は、busybox や OpenSSH に長い形がないもの）
 AGENT_SOCKET=$(git --git-dir=/srv/git/repo.git config --get gate.agentSocket || true)
 if [ -z "$AGENT_SOCKET" ]; then
-  echo "unlock: パスフレーズなしの鍵なので、解除は不要です"
+  echo "unlock: パスフレーズ付きの鍵ではない（パスフレーズなしの鍵か PAT）ので、解除は不要です"
   exit 0
 fi
 # ssh-agent が止まっていたら（ssh-add -l が 2 = 接続できない）、起動し直す

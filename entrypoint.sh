@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
+export GIT_TERMINAL_PROMPT=0   # 認証に失敗しても、端末で入力を求めない（HTTPS のとき）
 # オプションはなるべく長い形で書く（短い形のままのものは、busybox・OpenSSH・git に長い形がないもの）
 fail() { echo "entrypoint: $*" >&2; exit 1; }
-: "${UPSTREAM:?例: git@github.com:owner/repo.git}"
+: "${UPSTREAM:?例: git@github.com:owner/repo.git（PAT なら https://github.com/owner/repo.git）}"
 protected_branches="${PROTECTED_BRANCHES:-main develop}"   # 既定値はここだけ（フックは gate.protected を読む）
 case "$protected_branches" in
   *[*?[]*) fail "PROTECTED_BRANCHES にパターンは使えません（ブランチ名を完全一致で列挙）: $protected_branches" ;;
@@ -10,39 +11,76 @@ esac
 # 空白だけなどで 0 件になると何も守らないので拒否。区切りは空白 1 つにそろえる（パターンは上で拒否済み）
 # shellcheck disable=SC2086
 set -- $protected_branches; [ $# -gt 0 ] || fail "PROTECTED_BRANCHES が空です"; protected_branches="$*"; set --
-CONFIG_DIR=/config          # github_key, client_keys.pub, known_hosts を置いたディレクトリ（読み取り専用でマウント）
+CONFIG_DIR=/config          # github_key と known_hosts（または github_token）、client_keys.pub を置いたディレクトリ（読み取り専用でマウント）
 REPO=/srv/git/repo.git  # root で操作できるよう、Dockerfile で safe.directory に登録してある
 gate_git() { git --git-dir="$REPO" "$@"; }
 
-for file in github_key known_hosts; do
-  [ -s "$CONFIG_DIR/$file" ] || fail "$CONFIG_DIR/$file がありません"
-done
 [ -f "$CONFIG_DIR/client_keys.pub" ] || fail "$CONFIG_DIR/client_keys.pub がありません（空のファイルでよい）"
 
+# GitHub への接続は、SSH 鍵（github_key）か PAT（github_token、HTTPS）のどちらか一方
+if [ -e "$CONFIG_DIR/github_token" ] && [ -e "$CONFIG_DIR/github_key" ]; then
+  fail "$CONFIG_DIR に github_key と github_token の両方があります（どちらか一方にしてください）"
+fi
+if [ -e "$CONFIG_DIR/github_token" ]; then auth_method=token; else auth_method=key; fi
+# UPSTREAM は 1 行だけ（grep は行ごとに調べるので、正しい行を足した複数行がすり抜けないように）
+NEWLINE='
+'
+case "$UPSTREAM" in *"$NEWLINE"*) fail "UPSTREAM に改行があります" ;; esac
+# UPSTREAM の形も、接続のしかたに合っていることを確かめる（取り違えて、意図しない認証情報で接続しないように）。
+# PAT のときのエラーには UPSTREAM を表示しない（トークンが書かれていると、ログに残るため）
+case "$auth_method:$UPSTREAM" in
+  token:https://*) ;;
+  token:*) fail "github_token を使うときは、UPSTREAM を https://github.com/owner/repo.git の形にしてください" ;;
+  key:http://*|key:https://*) fail "UPSTREAM が HTTPS です。SSH 鍵なら git@github.com:owner/repo.git の形に、PAT なら $CONFIG_DIR/github_token を置いてください" ;;
+esac
+
 GITHUB_KEY=/home/git/.ssh/github_key
+GITHUB_TOKEN_FILE=/home/git/github_token
 AGENT_DIR=/run/git-push-gate
-# 止まった接続が後の push をすべて待たせないよう、タイムアウトを付ける（BatchMode: 対話的な入力を求めない）
-SSH_OPTIONS="-o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/github_known_hosts -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
-
-# GitHub 用の秘密鍵とホスト鍵（git ユーザーだけが読める）
-install --owner git --group git --mode 600 "$CONFIG_DIR/github_key" "$GITHUB_KEY"
-install --owner root --group root --mode 644 "$CONFIG_DIR/known_hosts" /etc/ssh/github_known_hosts
-
-if ssh-keygen -y -P '' -f "$GITHUB_KEY" >/dev/null 2>&1; then
-  # パスフレーズなし: 鍵ファイルを直接使う
-  ssh_command="ssh -i $GITHUB_KEY $SSH_OPTIONS"
-  agent_socket=""
+agent_socket=""
+ssh_command=""
+if [ "$auth_method" = token ]; then
+  # URL にはホスト名・ポート・パスだけを許す（ユーザー名やトークンを URL に書くと、記録やエラーに出る）
+  printf '%s\n' "$UPSTREAM" | grep -Exq 'https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+' \
+    || fail "UPSTREAM には https://ホスト名/owner/repo.git の形だけを書いてください（ユーザー名やトークンは入れない）"
+  upstream_origin=$(printf '%s\n' "$UPSTREAM" | sed 's|^\(https://[^/]*\)/.*|\1|')
+  # トークンは 1 行で、GitHub のトークンに使われる文字（英数字と _）だけ。credential helper の出力に、別の行を紛れ込ませないように
+  github_token=$(cat "$CONFIG_DIR/github_token")
+  case "$github_token" in
+    ''|*[!A-Za-z0-9_]*) fail "$CONFIG_DIR/github_token には、トークンを 1 行だけ書いてください（英数字と _ のみ。前後に空白を付けない）" ;;
+  esac
+  [ "${#github_token}" -ge 20 ] || fail "$CONFIG_DIR/github_token が短すぎます（トークンを書いてください）"
+  install --owner git --group git --mode 600 /dev/null "$GITHUB_TOKEN_FILE"
+  printf '%s\n' "$github_token" > "$GITHUB_TOKEN_FILE"
+  unset github_token
+  echo "entrypoint: GitHub には PAT（HTTPS）で接続します: $upstream_origin" >&2
 else
-  # パスフレーズ付き: コンテナ内の ssh-agent に、人間が unlock で一度だけ読み込ませる
-  [ -s "$CONFIG_DIR/github_key.pub" ] || fail "パスフレーズ付きの鍵には $CONFIG_DIR/github_key.pub も必要です"
-  install --owner git --group git --mode 644 "$CONFIG_DIR/github_key.pub" "$GITHUB_KEY.pub"
-  install --directory --owner git --group git --mode 700 "$AGENT_DIR"
-  agent_socket="$AGENT_DIR/agent.sock"
-  rm -f "$agent_socket"
-  su -s /bin/sh git -c "ssh-agent -a $agent_socket" >/dev/null
-  # -i に公開鍵を渡すと、エージェント内の対応する鍵だけを使う
-  ssh_command="ssh -i $GITHUB_KEY.pub -o IdentityAgent=$agent_socket $SSH_OPTIONS"
-  echo "entrypoint: 鍵はロックされています。ホストで次を実行してください: docker compose exec git-push-gate unlock" >&2
+  rm -f "$GITHUB_TOKEN_FILE"   # 前の起動で PAT を使っていたときのもの
+  for file in github_key known_hosts; do
+    [ -s "$CONFIG_DIR/$file" ] || fail "$CONFIG_DIR/$file がありません（PAT を使うなら、代わりに github_token を置く）"
+  done
+  # 止まった接続が後の push をすべて待たせないよう、タイムアウトを付ける（BatchMode: 対話的な入力を求めない）
+  SSH_OPTIONS="-o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/github_known_hosts -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+
+  # GitHub 用の秘密鍵とホスト鍵（git ユーザーだけが読める）
+  install --owner git --group git --mode 600 "$CONFIG_DIR/github_key" "$GITHUB_KEY"
+  install --owner root --group root --mode 644 "$CONFIG_DIR/known_hosts" /etc/ssh/github_known_hosts
+
+  if ssh-keygen -y -P '' -f "$GITHUB_KEY" >/dev/null 2>&1; then
+    # パスフレーズなし: 鍵ファイルを直接使う
+    ssh_command="ssh -i $GITHUB_KEY $SSH_OPTIONS"
+  else
+    # パスフレーズ付き: コンテナ内の ssh-agent に、人間が unlock で一度だけ読み込ませる
+    [ -s "$CONFIG_DIR/github_key.pub" ] || fail "パスフレーズ付きの鍵には $CONFIG_DIR/github_key.pub も必要です"
+    install --owner git --group git --mode 644 "$CONFIG_DIR/github_key.pub" "$GITHUB_KEY.pub"
+    install --directory --owner git --group git --mode 700 "$AGENT_DIR"
+    agent_socket="$AGENT_DIR/agent.sock"
+    rm -f "$agent_socket"
+    su -s /bin/sh git -c "ssh-agent -a $agent_socket" >/dev/null
+    # -i に公開鍵を渡すと、エージェント内の対応する鍵だけを使う
+    ssh_command="ssh -i $GITHUB_KEY.pub -o IdentityAgent=$agent_socket $SSH_OPTIONS"
+    echo "entrypoint: 鍵はロックされています。ホストで次を実行してください: docker compose exec git-push-gate unlock" >&2
+  fi
 fi
 
 # クライアント（devcontainer）の公開鍵を、強制コマンド付きで登録
@@ -73,7 +111,23 @@ for path in "$REPO" "$REPO/config" "$REPO/hooks" "$REPO/hooks/pre-receive"; do
   [ ! -L "$path" ] || fail "$path がシンボリックリンクです"
 done
 gate_git config remote.upstream.url "$UPSTREAM"   # fetch refspec は付けない
-gate_git config core.sshCommand "$ssh_command"
+# 前の起動で使った接続のしかたの設定は、消してから書き直す
+gate_git config --unset core.sshCommand || true
+gate_git config --remove-section credential 2>/dev/null || true
+for section in $(gate_git config --name-only --get-regexp '^credential\..*\.helper$' 2>/dev/null | sed 's/\.helper$//' || true); do
+  gate_git config --remove-section "$section" || true
+done
+gate_git config --remove-section http 2>/dev/null || true
+if [ "$auth_method" = token ]; then
+  # トークンは、ファイルから読んで git に渡す（URL にもコマンドラインにも書かないので、記録や ps に出ない）。
+  # UPSTREAM のホストにだけ渡す
+  gate_git config "credential.$upstream_origin.helper" \
+    "!f() { [ \"\$1\" = get ] || exit 0; echo username=x-access-token; printf 'password=%s\\n' \"\$(cat $GITHUB_TOKEN_FILE)\"; }; f"
+  # 止まった接続は、fetch・ls-remote・push のそれぞれの時間の上限（timeout）で打ち切る。
+  # http.lowSpeedLimit は使わない（GitHub が大きな push を処理している間の、通信の少ない時間で打ち切ってしまう）
+else
+  gate_git config core.sshCommand "$ssh_command"
+fi
 if [ -n "$agent_socket" ]; then
   gate_git config gate.agentSocket "$agent_socket"
 else
@@ -115,10 +169,10 @@ install --directory --owner root --group root --mode 700 "$HOST_KEY_DIR"
 [ -s "$HOST_KEY_DIR/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -C git-push-gate -f "$HOST_KEY_DIR/ssh_host_ed25519_key"
 
 # 最初の fetch（全履歴）は時間がかかるので、push の前に時間制限なしで済ませておく。
-# UPSTREAM・鍵・known_hosts の間違いもここで分かる。パスフレーズ付きの鍵は unlock の後に行う
+# UPSTREAM・鍵・known_hosts・トークンの間違いもここで分かる。パスフレーズ付きの鍵は unlock の後に行う
 if [ -z "$agent_socket" ]; then
   su -s /bin/sh git -c "git --git-dir=$REPO fetch --prune --no-tags --quiet upstream '+refs/heads/*:refs/heads/*'" \
-    || echo "entrypoint: 警告: GitHub から fetch できません（UPSTREAM・鍵・known_hosts を確認してください）" >&2
+    || echo "entrypoint: 警告: GitHub から fetch できません（UPSTREAM・鍵・known_hosts・トークンを確認してください）" >&2
 fi
 # push の中では gc を止めているので、起動時に整理する（push を受け付ける前なのでロックは要らない）。
 # どこからも使われていないオブジェクト（拒否された push の証明書など）も、すぐ消す（ゲートは GitHub の写しなので、消して困るものはない）

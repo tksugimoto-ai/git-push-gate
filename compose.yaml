@@ -1,7 +1,7 @@
 # ゲートを単独で起動する compose（devcontainer の compose に入れるときは examples/compose.yaml を参照）。
 # このリポジトリを、ワークスペース（devcontainer にマウントされるディレクトリ）の外に clone し、そのディレクトリで:
 #   cp .env.example .env    # エディタで UPSTREAM などを書く
-#   config/ に github_key・known_hosts・client_keys.pub を置く（README の「1. 鍵とホスト鍵を用意する」）
+#   config/ に github_key・known_hosts（PAT なら github_token）と client_keys.pub を置く（README の「1. 鍵とホスト鍵を用意する」）
 #   docker compose up --detach
 # .env と config/ は .gitignore と .dockerignore に入れてある（コミットもイメージへの取り込みもされない）。
 # このファイルは書き換えずに、設定はすべて .env に書く。
