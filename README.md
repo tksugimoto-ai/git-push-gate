@@ -129,9 +129,10 @@ SSH 鍵の代わりに、fine-grained PAT で GitHub に接続することもで
 - トークンはファイルから読んで git に渡し、URL やコマンドラインには書かないので、記録や `ps` には出ません。`UPSTREAM` にユーザー名やトークンを書くと起動しません
 - HTTPS のプロキシ（`HTTPS_PROXY`）には対応していません。push は sshd から呼ばれ、コンテナの環境変数を引き継がないため、起動時の fetch は通っても push は失敗します
 - パスフレーズで守る仕組み（`unlock`）はありません。守りは、エージェントから読めない場所に置くことで、パスフレーズなしの SSH 鍵と同じです
-- Workflows の権限がない PAT では、GitHub は `.github/workflows` を書き換える push を拒否します（「refusing to allow a Personal Access Token to create or update workflow … without `workflow` scope」）。ゲートを通る push では先端のワークフローが保護ブランチのどれかと同じになり、次の 2 つは GitHub に受け付けられることを確かめました（2026-11）
+- Workflows の権限がない PAT では、GitHub は `.github/workflows` を書き換える push を拒否します（「refusing to allow a Personal Access Token to create or update workflow … without `workflow` scope」）。ゲートを通る push では先端のワークフローが保護ブランチのどれかと同じ（か、そのファイルを消したもの）になり、次の 3 つは GitHub に受け付けられることを確かめました（2026-11）
   - 途中のコミットでワークフローを変えて、先端で元に戻した push
   - ワークフローの違う保護ブランチをマージして、push の前後で先端のワークフローが変わる push（新しくなった main をブランチにマージしたもの）
+  - ワークフローのファイルを消す push（新規ブランチの作成と、既存のブランチの更新の両方）
   - GitHub の判定のしかたは確かめていません（先端のワークフローの内容が GitHub にすでにあれば通る、ように見えます）。もし拒否されたら、main に rebase してください
 
 ```sh
