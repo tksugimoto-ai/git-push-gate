@@ -12,6 +12,7 @@ NETWORK="$CONTAINER_PREFIX-net"
 cleanup() {
   docker rm --force "$CONTAINER_PREFIX-github" "$CONTAINER_PREFIX-gate" "$CONTAINER_PREFIX-dev" >/dev/null 2>&1 || true
   docker volume rm --force "$CONTAINER_PREFIX-data" >/dev/null 2>&1 || true
+  [ ! -f "$WORK_DIR/clone/compose.yaml" ] || compose down --volumes --rmi local >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
   # コンテナ内で root が作ったファイルを消す
   docker run --rm --volume "$WORK_DIR:/w" --entrypoint sh "$IMAGE" -c 'rm -rf /w/* /w/.[!.]*' >/dev/null 2>&1 || true
@@ -25,6 +26,8 @@ run() {
     --env GIT_AUTHOR_NAME=t --env GIT_AUTHOR_EMAIL=t@example.com --env GIT_COMMITTER_NAME=t --env GIT_COMMITTER_EMAIL=t@example.com \
     "$IMAGE" -c "$1"
 }
+# clone に見立てたディレクトリで docker compose を実行する（下の「トップの compose.yaml」）
+compose() { (cd "$WORK_DIR/clone" && env -u UPSTREAM docker compose --project-name "$CONTAINER_PREFIX-compose" "$@"); }
 # クライアントの ssh（鍵と known_hosts をそのまま指定）
 CLIENT_SSH='ssh -i /w/client/id_ed25519 -o "UserKnownHostsFile=/w/config/known_hosts /w/client/known_hosts_gate"'
 
@@ -110,6 +113,42 @@ check "既定の bridge からゲートウェイ経由で push できる" 'RUN_N
     gateway=\$(ip route | awk \"/default/{print \\\$3}\")
     git init --quiet --initial-branch bridge /tmp/d && cd /tmp/d && $(commit x)
     GIT_SSH_COMMAND='"'"'$CLIENT_SSH -o HostKeyAlias=gate'"'"' git push --quiet ssh://git@\$gateway:$GATE_PORT/repo.git bridge" >"$WORK_DIR/out" 2>&1 && gh_has bridge'
+
+# トップの compose.yaml: clone したディレクトリに .env と config/ を置いて docker compose up する
+CLONE_DIR="$WORK_DIR/clone"
+COMPOSE_PORT=$((20000 + $$ % 20000))
+mkdir -p "$CLONE_DIR"
+(cd "$ROOT" && tar --exclude .git --exclude config --exclude .env -cf - .) | (cd "$CLONE_DIR" && tar -xf -)
+check "UPSTREAM を書かないと、compose は起動しない" \
+  '! compose config >"$WORK_DIR/out" 2>&1 && grep -q "UPSTREAM=" "$WORK_DIR/out"'
+check ".env と config/ は git の管理から外れている" \
+  'git -C "$ROOT" check-ignore --quiet .env && git -C "$ROOT" check-ignore --quiet config/github_key'
+mkdir "$CLONE_DIR/config"
+run "cp /w/github_key_plain /w/clone/config/github_key && cp /w/config/known_hosts /w/config/client_keys.pub /w/clone/config/"
+printf 'UPSTREAM=git@github.com:repo.git\nGATE_BIND=%s\nGATE_PORT=%s\n' "$BRIDGE_GATEWAY" "$COMPOSE_PORT" > "$CLONE_DIR/.env"
+# テストの「GitHub」に届くよう、テスト用のネットワークにもつなぐ（compose.override.yaml は自動で読まれる）
+printf 'services:\n  git-push-gate:\n    networks: [default, e2e]\nnetworks:\n  e2e:\n    name: %s\n    external: true\n' "$NETWORK" > "$CLONE_DIR/compose.override.yaml"
+# compose がビルドする（プロキシ経由でしか外に出られない環境では、compose と同じ名前で先にビルドしておく）
+if [ -n "${HTTPS_PROXY:-}" ]; then
+  docker build --quiet --network host --build-arg HTTPS_PROXY="$HTTPS_PROXY" --build-arg https_proxy="$HTTPS_PROXY" \
+    --tag "$CONTAINER_PREFIX-compose-git-push-gate" "$CLONE_DIR" >/dev/null
+  compose_build=""
+else
+  compose_build="--build"
+fi
+compose up --detach $compose_build --quiet-pull >"$WORK_DIR/compose-up.log" 2>&1 || { cat "$WORK_DIR/compose-up.log" >&2; exit 1; }
+RUN_NETWORK=bridge run "for i in \$(seq 30); do ssh-keyscan -p $COMPOSE_PORT -t ed25519 $BRIDGE_GATEWAY 2>/dev/null | grep . && exit 0; sleep 1; done; exit 1" \
+  | sed 's/^[^ ]*/compose-gate/' > "$WORK_DIR/known_hosts_compose"
+check "compose で起動したゲートが、起動時に GitHub を fetch している" \
+  'compose exec -T git-push-gate git --git-dir=/srv/git/repo.git rev-parse --quiet --verify refs/heads/develop >"$WORK_DIR/out" 2>&1'
+COMPOSE_SSH="ssh -i /w/client/id_ed25519 -o UserKnownHostsFile=/w/known_hosts_compose -o HostKeyAlias=compose-gate"
+check "compose で起動したゲートに、公開したポート経由で push できる" 'RUN_NETWORK=bridge run "set -e
+    git init --quiet --initial-branch viacompose /tmp/d && cd /tmp/d && $(commit x)
+    GIT_SSH_COMMAND='"'"'$COMPOSE_SSH'"'"' git push --quiet ssh://git@$BRIDGE_GATEWAY:$COMPOSE_PORT/repo.git viacompose" >"$WORK_DIR/out" 2>&1 && gh_has viacompose'
+check "compose で起動したゲートも、main への push は拒否" '! RUN_NETWORK=bridge run "set -e
+    git init --quiet --initial-branch main /tmp/d && cd /tmp/d && $(commit y)
+    GIT_SSH_COMMAND='"'"'$COMPOSE_SSH'"'"' git push --quiet --force ssh://git@$BRIDGE_GATEWAY:$COMPOSE_PORT/repo.git main" >"$WORK_DIR/out" 2>&1 && grep -q git-push-gate: "$WORK_DIR/out"'
+compose down --volumes --rmi local >/dev/null 2>&1
 
 # client/setup.sh: devcontainer に見立てたコンテナの中で実行し、push 先をゲートに向ける
 docker run --detach --name "$CONTAINER_PREFIX-dev" --network "$NETWORK" --volume "$ROOT/client:/client:ro" \

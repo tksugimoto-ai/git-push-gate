@@ -81,7 +81,7 @@ devcontainer (エージェント)                git-push-gate コンテナ     
 
 ### 1. 鍵とホスト鍵を用意する
 
-**ワークスペース（devcontainer にマウントされるディレクトリ）の外**に設定ディレクトリを作ります。
+**ワークスペース（devcontainer にマウントされるディレクトリ）の外**に設定ディレクトリを作ります。ゲートを単独で起動する（下記「[利用側のリポジトリを変更せずに使う](#利用側のリポジトリを変更せずに使うcompose-を使わない-devcontainer)」）なら、このリポジトリを clone したディレクトリの `config/` を設定ディレクトリにします（`gate_dir=~/git-push-gate/REPO/config` など）。
 
 ```sh
 gate_dir=~/.config/git-push-gate/REPO
@@ -121,7 +121,7 @@ docker compose exec git-push-gate unlock
 
 ### 2. compose に追加する
 
-[examples/compose.yaml](examples/compose.yaml) を参照してください。
+[examples/compose.yaml](examples/compose.yaml) を参照してください（ゲートを単独で起動するなら、下記「利用側のリポジトリを変更せずに使う」）。
 
 | 環境変数 | 説明 |
 |---|---|
@@ -177,14 +177,24 @@ devcontainer.json が `image` や Dockerfile の方式で compose を使って�
 
 devcontainer は既定の bridge ネットワークで動くのでコンテナ名では届かず、Feature では `--network` を指定できないためです。compose 方式でも、devcontainer.json の `dockerComposeFile` に書かれたファイルしか読まれない（`docker-compose.override.yml` や `COMPOSE_FILE` は使われない）ので、ゲートを足すには devcontainer.json の変更が要ります。
 
-1. ワークスペースの外に [examples/standalone/compose.yaml](examples/standalone/compose.yaml) を置き、同じディレクトリの `config/` に鍵など（「1. 鍵とホスト鍵を用意する」で作ったファイル）を置いて起動します。
+1. ワークスペースの外に、このリポジトリを clone します（対象のリポジトリごとに 1 つ）。トップの [compose.yaml](compose.yaml) でゲートを単独で起動します。
+   - 設定は `.env` に書き、`compose.yaml` は書き換えません。
+   - `config/` に鍵など（「1. 鍵とホスト鍵を用意する」で作ったファイル）を置きます。
+   - `.env` と `config/` は `.gitignore` と `.dockerignore` に入っているので、コミットされず、イメージにも入りません。
 
    ```sh
-   cd ~/.config/git-push-gate/REPO
-   docker info --format '{{.OperatingSystem}}'   # Docker Desktop か、それ以外か
-   echo GATE_BIND=172.17.0.1 > .env               # Docker Desktop 以外のときだけ（docker0 の IP）
+   git clone https://github.com/tksugimoto/git-push-gate.git ~/git-push-gate/REPO   # ワークスペースの外
+   cd ~/git-push-gate/REPO
+   git log -1                                     # ビルドするコミットを確かめる（中身を読んでおく）
+   cp .env.example .env                           # エディタで UPSTREAM などを書く
+   docker info --format '{{.OperatingSystem}}'    # Docker Desktop か、それ以外か
+   #   Docker Desktop 以外のときだけ、.env の GATE_BIND に docker0 の IP（多くは 172.17.0.1）を書く
    docker compose up --detach
+   docker compose logs git-push-gate              # GitHub から fetch できない警告が出ていないか
    ```
+
+   - GitHub に書き込める鍵を持つ部品なので、clone はエージェントが書き換えられる場所に置かないでください（次のビルドで中身を差し替えられます）。
+   - 更新するときは、`git fetch` して差分を読んでから `git merge --ff-only` し、`docker compose up --detach --build` します。パスフレーズ付きの鍵なら、この後もう一度 `unlock` が要ります。
 
    | Docker | 公開先（`GATE_BIND`） | devcontainer から見たゲート |
    |---|---|---|
