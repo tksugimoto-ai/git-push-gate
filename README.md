@@ -221,7 +221,7 @@ devcontainer は既定の bridge ネットワークで動くのでコンテナ�
   - `git.terminalAuthentication` を `false`（統合ターミナルに `GIT_ASKPASS` を設定し、VS Code が HTTPS の認証に答える仕組み）
   - `github.gitAuthentication` を `false`（その答えに、VS Code にサインインしている GitHub のアカウントを使う仕組み。サインインしていなくても、push のときにサインインを求める画面が出る）
 - VS Code で GitHub にサインインしない（サインアウトする）。devcontainer の中で動く拡張機能は、サインインしたアカウントのトークン（`repo` スコープなど）を受け取れ、エージェントが同じユーザーで動いていれば、それに届くおそれがある（推測。確かめてはいない）
-- SSH エージェントを転送しない。Dev Containers には転送を止める設定がなく、ホストに `SSH_AUTH_SOCK` があれば転送される（転送用のソケット `/tmp/vscode-ssh-auth-*.sock` は、エージェントがなくても作られることがある）。エージェントのない状態で VS Code を起動するのがよい。転送されても、ホストのエージェントに GitHub の鍵が入っていなければ迂回はできない（下の「確かめ方」の 4. で、GitHub に認証できないことを確かめる）
+- SSH エージェントを転送しない。Dev Containers には転送を止める設定がなく、ホストに `SSH_AUTH_SOCK` があれば転送される（転送用のソケット `/tmp/vscode-ssh-auth-*.sock` は、エージェントがなくても作られることがある）。エージェントのない状態で VS Code を起動するのがよい。VS Code を起動し直すときや接続し直すとき（ウィンドウの再読み込みなど）も、ホストにエージェントがない状態で行う（接続のたびに転送用のソケットを作り直すと思われ、確かめた後にホストでエージェントを起動すると、リビルドしなくても転送が始まりうる。推測。確かめてはいない）。転送されても、ホストのエージェントに GitHub の鍵が入っていなければ迂回はできない（下の「確かめ方」の 4. で、GitHub に認証できないことを確かめる）
 - `docker.sock` をマウントしない（docker-outside-of-docker の Feature なども使わない）
 - ゲートの設定ディレクトリ（`~/.config/git-push-gate` など）をマウントしない
 - **devcontainer の定義とワークスペースの `.git` は、エージェントが書き換えられる**ことに注意する
@@ -252,8 +252,10 @@ devcontainer を作ったら（リビルドのたびに）、**setup.sh より�
    ```
 
 2. SSH エージェントがない。`SSH_AUTH_SOCK=` は空、最初の `ssh-add -l` は「Could not open a connection to your authentication agent」。
-   - `/tmp/vscode-ssh-auth-*.sock` は、ホストにエージェントがなくても Dev Containers が作ることがあるので、あってよい。エージェントは `SSH_AUTH_SOCK` にこのソケットを指定すれば使えるので、ソケットごとの `ssh-add -l` が「Connection refused」などで接続できないこと（ソケットがなければ「No such file」）
-   - エージェントがあっても鍵がなければ「The agent has no identities」。鍵があれば、そのソケットを `SSH_AUTH_SOCK` に指定して 4. を実行し、GitHub に認証できないことを確かめる
+   - `/tmp/vscode-ssh-auth-*.sock`（Dev Containers の転送用のソケット）は、ホストにエージェントがなくても作られることがあるので、あってよい。エージェントは `SSH_AUTH_SOCK` にこのソケットを指定すれば使えるので、ソケットごとにつながるかを確かめる
+   - 合格: ソケットごとの出力が `Error connecting to agent: …` で始まる（「Connection refused」など、理由は問わない）。名前に `*` が残ったまま表示されたら（`/tmp/vscode-ssh-auth-*.sock` と `… No such file or directory`）、ソケットがないので合格（zsh では「no matches found」）
+   - 不合格: 鍵の一覧が出る、または「The agent has no identities」が出る（エージェントにつながっている）。鍵の一覧が出たら、そのソケットを `SSH_AUTH_SOCK` に指定して 4. を実行し、GitHub に認証できないことを確かめる
+   - 調べるのは `/tmp/vscode-ssh-auth-*.sock` だけ。Docker Desktop の `/run/host-services/ssh-auth.sock`（devcontainer.json でマウントした場合）と、devcontainer の中で起動した `ssh-agent` のソケット（`/tmp/ssh-*/agent.*`）は対象外
 
    ```sh
    echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-}"; ssh-add -l
