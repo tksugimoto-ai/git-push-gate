@@ -168,6 +168,20 @@ while IFS= read -r update_line; do
     head|refs/*|heads/*|tags/*|remotes/*|pull/*|-*|*/refs/*|*/head) reject "$ref は紛らわしい名前のため拒否" ;;
   esac
   if is_object_id "$branch_name_lower"; then reject "$ref は紛らわしい名前のため拒否"; fi
+  # origin/main や upstream/main のような名前は、ローカルのブランチ refs/heads/origin/main ができると、
+  # git の短い名前の解決が本物のリモート追跡ブランチ refs/remotes/origin/main より先にそちらを選ぶ
+  # （警告が 1 行出るだけ）。人間が origin/main を土台に rebase / merge / reset すると、エージェントのコミットが main に入る。
+  # 『短い名前 X を refs/heads/X が先に奪う』形を塞ぐ。remote の名前（origin・upstream。単独のものも含む）で始まる名前と、
+  # 保護ブランチ名で終わる名前（x/main は、短い名前 main を使う場面や、remote 名が別でも <remote>/main を奪う形になる）を拒否する。
+  # origin-cleanup のように、/ で区切られていない名前は拒否しない。保護ブランチは固定せず、設定から作る
+  case "$branch_name_lower" in
+    origin|upstream|origin/*|upstream/*) reject "$ref は remote 名と紛らわしい名前のため拒否" ;;
+  esac
+  for protected_lower in $PROTECTED_BRANCHES_LOWER; do
+    case "$branch_name_lower" in
+      */"$protected_lower") reject "$ref は保護ブランチ名で終わる紛らわしい名前のため拒否" ;;
+    esac
+  done
   # 保護ブランチ（大文字・小文字だけが違う Main なども含む）
   case " $PROTECTED_BRANCHES_LOWER " in *" $branch_name_lower "*) reject "$ref への push は禁止" ;; esac
   # 許可する接頭辞（ALLOWED_BRANCH_PREFIXES）が設定されていれば、それ以外のブランチは作成・更新・削除させない

@@ -244,6 +244,14 @@ expect ng "heads/ で始まる名前" origin u8:refs/heads/heads/main
 expect ng "tags/ で始まる名前（タグ v9 がある）" origin u8:refs/heads/tags/v9
 expect ng "シェルの特殊文字を含む名前" origin 'u8:refs/heads/x$(id)'
 expect ng "; を含む名前" origin 'u8:refs/heads/a;b'
+expect ng "origin/ で始まる名前" origin u8:refs/heads/origin/main
+expect ng "upstream/ で始まる名前" origin u8:refs/heads/upstream/main
+expect ng "origin という名前" origin u8:refs/heads/origin
+expect ng "大文字の Origin/ で始まる名前" origin u8:refs/heads/Origin/x
+expect ng "保護ブランチ名で終わる名前（x/main）" origin u8:refs/heads/x/main
+expect ng "保護ブランチ名で終わる名前（x/Develop）" origin u8:refs/heads/x/Develop
+expect ok "origin で始まるが / で区切られない名前" origin u8:refs/heads/origin-cleanup
+expect ok "origin を途中に含む名前" origin u8:refs/heads/agent/fix-origin-bug
 expect ok "英数字と . _ / - の名前" origin u8:refs/heads/agent/fix-1.2_x
 # 変な mode（中身は main と同じ）
 ci_blob=$(git ls-tree origin/main .github/workflows/ci.yml | awk '{print $3}')
