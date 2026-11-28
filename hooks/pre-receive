@@ -66,12 +66,24 @@ done
 
 # --- ワークフローと複合アクションの検査 ---
 # ワークフローと複合アクションは、エージェントには変更させない（人間が push する）。
-# 許すのは、保護ブランチのどれか 1 つと同じ内容だけ（ワークフローのファイルを消すのは可）。
+# 許すのは、保護ブランチのどれか 1 つと「完全に同一」の内容だけ。ファイルを 1 つでも消したり、
+# 一部だけを持ち込んだりした一覧（部分集合）は許さない。欠けた一覧は、PR のマージで別のブランチの
+# 版と継ぎ合わせて、誰も書いていないワークフローを組み立てる材料になるため（rename で別のパスから
+# ワークフローの位置に持ち込む手口を含む）。
+# さらに、先端のコミットだけでなく、この push が「新しく持ち込むコミット」すべてについて確かめる。
+# PR のマージコミット（refs/pull/N/merge）は、先端だけを見ていては検査されない中間コミットや
+# 分岐点（マージベース）の中身を継ぎ合わせられるため。先端だけの検査では、この材料を縛れない。
 # 中身は解析しない（GitHub のパーサーとの解釈の違いや、PR のマージコミットで組み合わされた内容を
-# 突かれるため）。履歴（親や分岐点）も使わない（エージェントが自由に作れるため）。
+# 突かれるため）。
+# 履歴（親や分岐点）の「位置」は信用しない（エージェントが自由に作れるため）。ただし、ここで確かめるのは
+# 各コミットの「中身」であって、それがどこに置かれているか（位置）ではない。位置を信用しないことと、
+# すべての新しいコミットの中身を確かめることは別のこと。
 # push 先の今の内容も基準にしない。人間が試しているワークフロー（保護していないブランチ）や、
 # 人間が直す前の古い版の上に、エージェントのコードを載せて動かせてしまうため
 WORKFLOWS_DIR=.github/workflows
+# 1 回の push で新しく持ち込めるコミットの数の上限。これを超える巨大な履歴は、1 コミットずつの検査が
+# ロックを持ったまま長時間かかるので、拒否する（CLOSED に倒す）。通常の作業では十分に大きい
+NEW_COMMIT_LIMIT=5000
 # git の失敗を「項目なし」と取り違えないよう、どれも失敗したら拒否する（github_dirs_are_trees などは if や || の中で
 # 呼ばれ、set -e が効かないため、明示的に確かめる）
 # tree_entry コミット パス: そのパスの項目（mode type oid と、引用符付きのパス）。なければ空
@@ -109,10 +121,38 @@ has_no_case_variants() {
   github_names=$(git ls-tree --name-only "$1" -- .github/) || reject "$1 の .github を読めません"
   for_each_line "$github_names" is_not_subdir_variant
 }
-# all_lines_allowed 行の一覧 許す行の一覧: 前者のすべての行が後者にあれば真（grep を使わず、シェルだけで比べる）
-is_allowed_line() { case "$NEWLINE$allowed_lines$NEWLINE" in *"$NEWLINE$1$NEWLINE"*) ;; *) return 1 ;; esac; }
-all_lines_allowed() { allowed_lines=$2; for_each_line "$1" is_allowed_line; }
-# check_commit ref コミット: push されたコミットの .github を検査する。通らなければ拒否して終わる
+# actions と workflows は同じ 1 つの保護ブランチのものと一致していなければならない（別々のブランチの
+# 組み合わせは不可）ので、両者を 1 つの「レコード」にまとめて、保護ブランチのレコードと完全一致するかを見る。
+# GITHUB_SET_MARK はレコード内（actions と workflows の間）の区切り、GITHUB_SET_SEP はレコード間の区切り。
+# どちらも ls-tree の行（先頭が mode でタブを含む）には現れない形なので、中身と取り違えない
+GITHUB_SET_MARK=':::git-push-gate actions/workflows 区切り:::'
+GITHUB_SET_SEP=':::git-push-gate 保護セット境界:::'
+# github_set_record actions workflows: 1 コミット分のレコードを作る（$(...) で呼ぶので末尾改行は落ちるが、
+# 保護側・push 側の両方で同じ関数を使うので、落ち方もそろう）
+github_set_record() { printf '%s\n%s\n%s' "$1" "$GITHUB_SET_MARK" "$2"; }
+# 保護ブランチのレコードを、コミットの検査の前に 1 回だけ作る（コミットごとに読み直すと、たくさんの
+# コミットを含む push でロックを持ったまま長時間動き続けるため）。各レコードを SEP で挟んでつなぐ。
+# .github がディレクトリでない保護ブランチは、中身を列挙できないので、基準から外す（= 一致させない）
+PROTECTED_GITHUB_SETS=""
+for branch in $PROTECTED_BRANCHES; do
+  protected_tip=$(fetched_tip "refs/heads/$branch"); github_dirs_are_trees "$protected_tip" || continue
+  # [ ] や if の中のコマンド置換では、読めないときの reject がサブシェルを抜けるだけになるので、先に変数に入れる
+  protected_actions=$(tree_entry "$protected_tip" .github/actions) || exit 1
+  protected_workflows=$(list_workflow_files "$protected_tip") || exit 1
+  protected_record=$(github_set_record "$protected_actions" "$protected_workflows") || reject "保護ブランチ $branch の .github を読めません"
+  PROTECTED_GITHUB_SETS="$PROTECTED_GITHUB_SETS$GITHUB_SET_SEP$NEWLINE$protected_record$NEWLINE"
+done
+PROTECTED_GITHUB_SETS="$PROTECTED_GITHUB_SETS$GITHUB_SET_SEP"
+# github_set_is_protected レコード: そのレコードが保護ブランチのどれかと完全一致すれば真（case だけで比べる）。
+# どのレコードも SEP で挟まれているので、SEP レコード SEP の形で引けば、部分集合は一致しない
+github_set_is_protected() {
+  case "$PROTECTED_GITHUB_SETS" in
+    *"$GITHUB_SET_SEP$NEWLINE$1$NEWLINE$GITHUB_SET_SEP"*) ;;
+    *) return 1 ;;
+  esac
+}
+# check_commit ref コミット: そのコミット 1 つの .github を検査する。通らなければ拒否して終わる。
+# 見るのはコミットの「中身」。履歴のどこに置かれているか（位置）は見ない（上記）
 check_commit() {
   # ブランチにはコミットだけを置かせる（注釈付きタグのオブジェクトなども ls-tree は中を見てしまう）
   [ "$(git cat-file -t "$2" 2>/dev/null || true)" = commit ] || reject "$1: コミット以外は push できません"
@@ -120,15 +160,32 @@ check_commit() {
   has_no_case_variants "$2" || reject "$1: 大文字・小文字だけが違う .github / workflows / actions は使えません"
   pushed_workflows=$(list_workflow_files "$2") || exit 1
   pushed_actions=$(tree_entry "$2" .github/actions) || exit 1
-  for branch in $PROTECTED_BRANCHES; do
-    protected_tip=$(fetched_tip "refs/heads/$branch"); github_dirs_are_trees "$protected_tip" || continue
-    # [ ] や if の中のコマンド置換では、読めないときの reject がサブシェルを抜けるだけで空と比べてしまうので、先に変数に入れる
-    protected_actions=$(tree_entry "$protected_tip" .github/actions) || exit 1
-    [ "$pushed_actions" = "$protected_actions" ] || continue
-    protected_workflows=$(list_workflow_files "$protected_tip") || exit 1
-    if all_lines_allowed "$pushed_workflows" "$protected_workflows"; then return 0; fi
-  done
-  reject "$1: .github/workflows か .github/actions が、どの保護ブランチとも一致しないため拒否。main に rebase するか、人間が push してください"
+  pushed_record=$(github_set_record "$pushed_actions" "$pushed_workflows") || reject "$1: .github を読めません"
+  github_set_is_protected "$pushed_record" \
+    || reject "$1: .github/workflows か .github/actions が、どの保護ブランチとも完全一致しないため拒否。main に rebase するか、人間が push してください"
+}
+# check_new_commits ref 先端のコミット: この push が新しく持ち込むコミットすべてと先端を検査する。
+# 「新しく持ち込むコミット」= 先端から辿れて、ゲートが既に持つ GitHub のブランチのどれからも辿れないもの。
+# 以前は先端だけを見ていたため、PR のマージが、検査していない中間コミットや分岐点（マージベース）の中身を
+# 継ぎ合わせられた。中間コミットが「ブランチが指さないから動かない」のは head の実行の話で、マージベースや
+# rename の材料としては使われるので、そこを塞ぐ。中身の検査は位置と無関係にすべての新しいコミットに及ぶ
+check_new_commit_line() { check_commit "$check_commit_ref" "$1"; }
+check_new_commits() {
+  check_commit_ref=$1
+  # 先端は必ず検査する。既存の ref から辿れる古いコミット（人間が直す前のワークフローを持つ版など）を
+  # 指していても、今の保護ブランチと一致しない版は拒否するため（rev-list では既存 ref 内のコミットは出ない）
+  check_commit "$1" "$2"
+  # --branches は直前に fetch した GitHub のブランチ（refs/heads/*）だけを指す。ゲートはこれしか ref を
+  # 持たず、エージェントはゲート以外で ref を作れない（PR 用のトークンは Contents: read）ので、これが
+  # 「既に GitHub にある＝検査済みか、保護ブランチ由来の人間の版」の集合になる。同じ push 内で先に処理した
+  # 別のブランチはまだ ref になっていないため、その分のコミットも重複して検査される（抜けは生じない）。
+  # 巨大な履歴を持ち込まれてロックを持ったまま止まらないよう、上限を超えたら CLOSED に倒して（拒否して）止める。
+  # まず上限 + 1 個目があるかだけを見て（走査はその分で打ち切られる）、なければ全件を列挙する
+  overflow=$(git rev-list --skip="$NEW_COMMIT_LIMIT" --max-count=1 "$2" --not --branches) \
+    || reject "$1: 新しいコミットを数えられません"
+  [ -z "$overflow" ] || reject "$1: 一度に push できる新しいコミットは $NEW_COMMIT_LIMIT 個までです。分けて push してください"
+  new_commits=$(git rev-list "$2" --not --branches) || reject "$1: 新しいコミットを列挙できません"
+  for_each_line "$new_commits" check_new_commit_line
 }
 
 # --- 受け取った更新を 1 行ずつ検査する ---
@@ -200,7 +257,7 @@ while IFS= read -r update_line; do
     [ -n "$fetched_oid" ] || reject "$ref は GitHub にありません"
     push_spec=":$ref"                       # ブランチ削除
   else
-    check_commit "$ref" "$new_oid"
+    check_new_commits "$ref" "$new_oid"
     push_spec="$new_oid:$ref"
     # 同じ名前のタグがないかを後で確かめる（削除は紛らわしさをなくすので許す）
     created_or_updated_branches="$created_or_updated_branches $branch_name"
