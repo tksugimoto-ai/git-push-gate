@@ -107,18 +107,29 @@ for_each_line() {
   done
   IFS=$saved_ifs
 }
-# 大文字・小文字だけが違う .GITHUB や .github/Workflows は、取り違えのもとなので拒否
-is_not_github_variant() { case "$1" in .github) ;; .[gG][iI][tT][hH][uU][bB]) return 1 ;; esac; }
+# 大文字・小文字だけが違う .GITHUB や .github/Workflows は、取り違えのもとなので拒否。
+# ASCII 以外も拒否する。.github/actionſ（ſ は U+017F で APFS では s と同じ扱い）や .gıthub（ı は U+0131 で NTFS では I に
+# 大文字化される）のような Unicode の変種は、大文字小文字・正規化の規則を網羅できないので、守る場所（ルートと .github 直下）の
+# 名前は、印字できる ASCII だけのものに限る。ls-tree は core.quotePath=false で読み、名前を生のバイトで見る
+# （既定だと "\305\277" のような引用符付きの ASCII になる）。引用符付きになる名前（" \ や制御文字を含むもの）も拒否する。
+# 範囲 [ -~] はロケールで意味が変わるので、LC_ALL=C に固定してバイト単位で比べる
+LC_ALL=C; export LC_ALL
+is_plain_ascii_name() { case "$1" in ''|*[!\ -~]*|*\"*|*\\*) return 1 ;; esac; }
+is_not_github_variant() {
+  is_plain_ascii_name "$1" || return 1
+  case "$1" in .github) ;; .[gG][iI][tT][hH][uU][bB]) return 1 ;; esac
+}
 is_not_subdir_variant() {
+  is_plain_ascii_name "$1" || return 1
   case "$1" in
     .github/workflows|.github/actions) ;;
     .github/[wW][oO][rR][kK][fF][lL][oO][wW][sS]|.github/[aA][cC][tT][iI][oO][nN][sS]) return 1 ;;
   esac
 }
 has_no_case_variants() {
-  root_names=$(git ls-tree --name-only "$1") || reject "$1 を読めません"
+  root_names=$(git -c core.quotePath=false ls-tree --name-only "$1") || reject "$1 を読めません"
   for_each_line "$root_names" is_not_github_variant || return 1
-  github_names=$(git ls-tree --name-only "$1" -- .github/) || reject "$1 の .github を読めません"
+  github_names=$(git -c core.quotePath=false ls-tree --name-only "$1" -- .github/) || reject "$1 の .github を読めません"
   for_each_line "$github_names" is_not_subdir_variant
 }
 # actions と workflows は同じ 1 つの保護ブランチのものと一致していなければならない（別々のブランチの
@@ -157,7 +168,7 @@ check_commit() {
   # ブランチにはコミットだけを置かせる（注釈付きタグのオブジェクトなども ls-tree は中を見てしまう）
   [ "$(git cat-file -t "$2" 2>/dev/null || true)" = commit ] || reject "$1: コミット以外は push できません"
   github_dirs_are_trees "$2" || reject "$1: .github か .github/workflows がディレクトリではありません"
-  has_no_case_variants "$2" || reject "$1: 大文字・小文字だけが違う .github / workflows / actions は使えません"
+  has_no_case_variants "$2" || reject "$1: 大文字・小文字だけが違う .github / workflows / actions や、ルートと .github 直下の ASCII 以外（引用符付きになる）名前は使えません"
   pushed_workflows=$(list_workflow_files "$2") || exit 1
   pushed_actions=$(tree_entry "$2" .github/actions) || exit 1
   pushed_record=$(github_set_record "$pushed_actions" "$pushed_workflows") || reject "$1: .github を読めません"

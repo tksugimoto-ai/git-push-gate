@@ -107,6 +107,17 @@ git switch --quiet --force-create w10 origin/main; mkdir --parents .GITHUB/workf
 expect ng "大文字の .GITHUB" origin w10
 git switch --quiet --force-create w11 origin/main; mkdir --parents .github/Workflows; echo 'on: push' > .github/Workflows/x.yml; git add --all; git commit --quiet --message w11
 expect ng "大文字の .github/Workflows" origin w11
+# Unicode の変種（APFS・NTFS の大文字小文字を区別しない比較で .github/actions や .github と同じになる）。.github 自体は main と同一のまま足す
+git switch --quiet --force-create w11a origin/main; long_s=$(printf '\305\277'); mkdir --parents ".github/action${long_s}/a"; echo 'runs: evil' > ".github/action${long_s}/a/action.yml"; git add --all; git commit --quiet --message w11a
+expect ng ".github/actionſ（U+017F）" origin w11a
+git switch --quiet --force-create w11b origin/main; dotless_i=$(printf '\304\261'); mkdir --parents ".g${dotless_i}thub/workflows"; echo 'on: push' > ".g${dotless_i}thub/workflows/y.yml"; git add --all; git commit --quiet --message w11b
+expect ng "ルートの .gıthub（U+0131）" origin w11b
+git switch --quiet --force-create w11c origin/main; mkdir --parents ".github/workflows/${long_s}"; echo 'on: push' > ".github/workflows/${long_s}/x.yml"; git add --all; git commit --quiet --message w11c
+expect ng ".github/workflows の下の ASCII 以外のディレクトリ（ワークフローの追加）" origin w11c
+git switch --quiet --force-create w11d origin/main; echo 'ok' > "$(printf 'docs_\303\251.md')"; git add --all; git commit --quiet --message w11d
+expect ng "ルートの ASCII 以外のファイル名" origin w11d
+git switch --quiet --force-create w11e origin/main; mkdir --parents src; echo ok > "src/$(printf '\303\251').txt"; git add --all; git commit --quiet --message w11e
+expect ok "深い場所の ASCII 以外のファイル名は許す" origin w11e
 git switch --quiet --force-create w12 origin/main; git rm -r --quiet .github/actions; ln -s ../x .github/actions; git add --all; git commit --quiet --message w12
 expect ng ".github/actions がシンボリックリンク" origin w12
 # 並びの壊れた木（zzz の後ろに .github）。ls-tree に .github が見えないので、fsck で止める
